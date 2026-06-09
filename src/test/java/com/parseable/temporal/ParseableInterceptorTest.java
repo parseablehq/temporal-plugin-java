@@ -7,9 +7,10 @@ import io.temporal.activity.ActivityMethod;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
-import io.temporal.worker.WorkerOptions;
+import io.temporal.worker.WorkerFactoryOptions;
 import io.temporal.workflow.Workflow;
 import io.temporal.workflow.WorkflowInterface;
 import io.temporal.workflow.WorkflowMethod;
@@ -43,15 +44,16 @@ class ParseableInterceptorTest {
 
   @BeforeEach
   void setUp() {
-    testEnv = TestWorkflowEnvironment.newInstance();
-    client = testEnv.getWorkflowClient();
     spy = new SpyEmitter();
-
-    Worker worker = testEnv.newWorker(
-        "test-queue",
-        WorkerOptions.newBuilder()
-            .setInterceptors(new ParseableWorkerInterceptor(spy))
+    testEnv = TestWorkflowEnvironment.newInstance(
+        TestEnvironmentOptions.newBuilder()
+            .setWorkerFactoryOptions(WorkerFactoryOptions.newBuilder()
+                .setWorkerInterceptors(new ParseableWorkerInterceptor(spy))
+                .build())
             .build());
+    client = testEnv.getWorkflowClient();
+
+    Worker worker = testEnv.newWorker("test-queue");
     worker.registerWorkflowImplementationTypes(HelloWorkflowImpl.class);
     worker.registerActivitiesImplementations(new HelloActivitiesImpl());
     testEnv.start();

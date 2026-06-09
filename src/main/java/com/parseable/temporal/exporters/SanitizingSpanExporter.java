@@ -54,6 +54,7 @@ public final class SanitizingSpanExporter implements SpanExporter {
   private SpanData sanitizeSpan(SpanData span) {
     Attributes original = span.getAttributes();
     AttributesBuilder builder = Attributes.builder();
+    boolean[] changed = { false };
 
     original.forEach((key, value) -> {
       String type = key.getType().name(); // STRING, BOOLEAN, LONG, DOUBLE, STRING_ARRAY, ...
@@ -62,43 +63,43 @@ public final class SanitizingSpanExporter implements SpanExporter {
         case "BOOLEAN":
         case "LONG":
         case "DOUBLE":
-          // Primitive — safe to pass through
           putUnchecked(builder, key, value);
           break;
         case "STRING_ARRAY":
-          // Flatten array to comma-joined string
           @SuppressWarnings("unchecked")
           List<String> strings = (List<String>) value;
           builder.put(key.getKey(), String.join(", ", strings));
+          changed[0] = true;
           break;
         case "BOOLEAN_ARRAY":
           @SuppressWarnings("unchecked")
           List<Boolean> booleans = (List<Boolean>) value;
           builder.put(key.getKey(), joinToString(booleans));
+          changed[0] = true;
           break;
         case "LONG_ARRAY":
           @SuppressWarnings("unchecked")
           List<Long> longs = (List<Long>) value;
           builder.put(key.getKey(), joinToString(longs));
+          changed[0] = true;
           break;
         case "DOUBLE_ARRAY":
           @SuppressWarnings("unchecked")
           List<Double> doubles = (List<Double>) value;
           builder.put(key.getKey(), joinToString(doubles));
+          changed[0] = true;
           break;
         default:
           // Unknown / map type — drop silently
+          changed[0] = true;
           break;
       }
     });
 
-    Attributes sanitizedAttrs = builder.build();
-
-    // Only wrap if attributes actually changed
-    if (sanitizedAttrs.size() == original.size()) {
+    if (!changed[0]) {
       return span;
     }
-    return new SanitizedSpanData(span, sanitizedAttrs);
+    return new SanitizedSpanData(span, builder.build());
   }
 
   @SuppressWarnings("unchecked")

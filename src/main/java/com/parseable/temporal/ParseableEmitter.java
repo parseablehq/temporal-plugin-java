@@ -33,7 +33,7 @@ import java.util.concurrent.TimeUnit;
  * <p>Call {@link #close()} (or let {@link ParseablePlugin#close()} do it) to flush and shut down
  * both providers before your JVM exits.
  */
-public final class ParseableEmitter implements AutoCloseable {
+public class ParseableEmitter implements AutoCloseable {
 
   static final String INSTRUMENTATION_SCOPE = "temporal-parseable";
 

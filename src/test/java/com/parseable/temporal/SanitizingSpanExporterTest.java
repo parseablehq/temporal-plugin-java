@@ -136,6 +136,9 @@ class SanitizingSpanExporterTest {
     @Override public InstrumentationScopeInfo getInstrumentationScopeInfo() {
       return InstrumentationScopeInfo.create("test");
     }
+    @Override public io.opentelemetry.sdk.common.InstrumentationLibraryInfo getInstrumentationLibraryInfo() {
+      return io.opentelemetry.sdk.common.InstrumentationLibraryInfo.create("test", null);
+    }
     @Override public Resource getResource() { return Resource.empty(); }
   }
 }
