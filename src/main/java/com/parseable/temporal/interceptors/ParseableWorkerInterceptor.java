@@ -10,21 +10,7 @@ import io.temporal.common.interceptors.WorkflowInboundCallsInterceptor;
 
 /**
  * Top-level {@link WorkerInterceptor} that wires the Parseable workflow and activity interceptors
- * into a Temporal worker.
- *
- * <p>Register it via {@link io.temporal.worker.WorkerOptions}:
- *
- * <pre>{@code
- * ParseablePlugin plugin = new ParseablePlugin(ParseableConfig.fromEnv());
- *
- * Worker worker = workerFactory.newWorker(
- *     "my-queue",
- *     WorkerOptions.newBuilder()
- *         .setInterceptors(plugin.getWorkerInterceptor())
- *         .build());
- * }</pre>
- *
- * Or simply use {@link com.parseable.temporal.ParseablePlugin#configureWorkerOptions(io.temporal.worker.WorkerOptions.Builder)}.
+ * into a Temporal worker. Registered automatically by {@link com.parseable.temporal.ParseablePlugin}.
  */
 public final class ParseableWorkerInterceptor implements WorkerInterceptor {
 

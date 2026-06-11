@@ -20,19 +20,13 @@ public final class Client {
   private static final String TASK_QUEUE = "parseable-demo-queue";
 
   public static void main(String[] args) {
-    ParseableConfig config = ParseableConfig.fromEnv();
-    ParseablePlugin plugin = new ParseablePlugin(config);
+    ParseablePlugin plugin = new ParseablePlugin(ParseableConfig.fromEnv());
 
     try {
       WorkflowServiceStubs stubs = WorkflowServiceStubs.newServiceStubs(
-          plugin.configureServiceStubOptions(
-              WorkflowServiceStubsOptions.newBuilder())
-              .build());
+          WorkflowServiceStubsOptions.newBuilder().setPlugins(plugin).build());
 
-      WorkflowClient client = WorkflowClient.newInstance(stubs,
-          plugin.configureClientOptions(
-              io.temporal.client.WorkflowClientOptions.newBuilder())
-              .build());
+      WorkflowClient client = WorkflowClient.newInstance(stubs);
 
       // --- Greeting workflow (should succeed) ---
       System.out.println("Starting GreetingWorkflow...");
@@ -59,6 +53,7 @@ public final class Client {
         System.out.println("Workflow failed as expected: " + e.getMessage());
       }
 
+      ParseableConfig config = plugin.getConfig();
       System.out.println("\nAll workflows triggered. Check Parseable streams:");
       System.out.println("  Logs:   " + config.logsEndpoint());
       System.out.println("  Traces: " + config.tracesEndpoint());

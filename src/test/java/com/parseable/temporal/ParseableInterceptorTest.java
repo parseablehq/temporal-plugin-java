@@ -1,7 +1,5 @@
 package com.parseable.temporal;
 
-import com.parseable.temporal.interceptors.ParseableWorkerInterceptor;
-
 import io.temporal.activity.ActivityInterface;
 import io.temporal.activity.ActivityMethod;
 import io.temporal.activity.ActivityOptions;
@@ -9,6 +7,7 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
+import io.temporal.testing.WorkflowReplayer;
 import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactoryOptions;
 import io.temporal.workflow.Workflow;
@@ -26,34 +25,29 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * Integration tests for the Parseable interceptors using Temporal's in-process test environment.
- *
- * <p>Tagged {@code integration} — excluded from CI by default (requires JVM network access for
- * the test server binary). Run locally with:
- * <pre>
- *   mvn test -Pintegration
- * </pre>
- */
+/** Tests for Parseable interceptors using Temporal's in-process test environment. */
 @Tag("integration")
 class ParseableInterceptorTest {
 
   private TestWorkflowEnvironment testEnv;
   private WorkflowClient client;
+  private ParseablePlugin plugin;
   private SpyEmitter spy;
+  private Worker worker;
 
   @BeforeEach
   void setUp() {
     spy = new SpyEmitter();
+    plugin = new ParseablePlugin(testConfig(), spy);
     testEnv = TestWorkflowEnvironment.newInstance(
         TestEnvironmentOptions.newBuilder()
             .setWorkerFactoryOptions(WorkerFactoryOptions.newBuilder()
-                .setWorkerInterceptors(new ParseableWorkerInterceptor(spy))
+                .setPlugins(plugin)
                 .build())
             .build());
     client = testEnv.getWorkflowClient();
 
-    Worker worker = testEnv.newWorker("test-queue");
+    worker = testEnv.newWorker("test-queue");
     worker.registerWorkflowImplementationTypes(HelloWorkflowImpl.class);
     worker.registerActivitiesImplementations(new HelloActivitiesImpl());
     testEnv.start();
@@ -62,6 +56,7 @@ class ParseableInterceptorTest {
   @AfterEach
   void tearDown() {
     testEnv.close();
+    plugin.close();
   }
 
   @Test
@@ -86,23 +81,29 @@ class ParseableInterceptorTest {
   }
 
   @Test
-  void replaySafetyNoDuplicateEvents() throws Exception {
-    // Run the workflow and capture how many events were fired
-    HelloWorkflow wf = client.newWorkflowStub(
-        HelloWorkflow.class,
-        WorkflowOptions.newBuilder()
-            .setTaskQueue("test-queue")
-            .setWorkflowExecutionTimeout(Duration.ofSeconds(10))
-            .build());
-
+  void replayDoesNotEmitDuplicateEvents() throws Exception {
+    // Run the workflow and capture its execution reference for history extraction.
+    WorkflowOptions opts = WorkflowOptions.newBuilder()
+        .setTaskQueue("test-queue")
+        .setWorkflowId("replay-test")
+        .setWorkflowExecutionTimeout(Duration.ofSeconds(10))
+        .build();
+    HelloWorkflow wf = client.newWorkflowStub(HelloWorkflow.class, opts);
     wf.greet("Replay");
 
-    long workflowStarted = spy.events.stream()
-        .filter(e -> e.contains("workflow") && e.contains("started"))
-        .count();
+    int eventsAfterFirstRun = spy.events.size();
+    assertTrue(eventsAfterFirstRun > 0);
 
-    // Despite any internal replay, the user should see exactly one "started" event
-    assertEquals(1, workflowStarted, "Replay guard should prevent duplicate 'started' events");
+    // Fetch completed history and replay it through WorkflowReplayer.
+    // During replay Workflow.isReplaying() is true throughout, so the interceptor
+    // must not call the emitter at all.
+    spy.events.clear();
+
+    WorkflowReplayer.replayWorkflowExecution(
+        client.fetchHistory("replay-test"), worker);
+
+    assertEquals(0, spy.events.size(),
+        "No events should be emitted during replay; got: " + spy.events);
   }
 
   // ── Test workflow / activity stubs ────────────────────────────────────────
@@ -147,9 +148,7 @@ class ParseableInterceptorTest {
     final List<String> events = new ArrayList<>();
 
     SpyEmitter() {
-      super(ParseableConfig.builder()
-          .endpoint("http://localhost:9999")   // unreachable — spy never sends
-          .build());
+      super(testConfig());
     }
 
     @Override
@@ -165,5 +164,20 @@ class ParseableInterceptorTest {
         String status, String errorMessage) {
       events.add("activity:" + activityType + ":" + status);
     }
+
+    @Override
+    public void emitActivityEvent(
+        String workflowId, String activityId, String activityType, String taskQueue,
+        String status, String errorMessage) {
+      events.add("activity:" + activityId + ":" + activityType + ":" + status);
+    }
+  }
+
+  private static ParseableConfig testConfig() {
+    return ParseableConfig.builder()
+        .endpoint("http://localhost:9999")
+        .username("test")
+        .password("test")
+        .build();
   }
 }

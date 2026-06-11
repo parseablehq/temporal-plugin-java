@@ -8,9 +8,11 @@ import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.logs.Severity;
 import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanContext;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.context.Context;
 import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporter;
 import io.opentelemetry.exporter.otlp.http.trace.OtlpHttpSpanExporter;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -22,6 +24,7 @@ import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
 
 import java.time.Duration;
 import java.util.Base64;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -46,6 +49,7 @@ public class ParseableEmitter implements AutoCloseable {
   // Span attribute keys
   private static final AttributeKey<String> WORKFLOW_ID_KEY = AttributeKey.stringKey("temporal.workflow.id");
   private static final AttributeKey<String> WORKFLOW_TYPE_KEY = AttributeKey.stringKey("temporal.workflow.type");
+  private static final AttributeKey<String> ACTIVITY_ID_KEY = AttributeKey.stringKey("temporal.activity.id");
   private static final AttributeKey<String> ACTIVITY_TYPE_KEY = AttributeKey.stringKey("temporal.activity.type");
   private static final AttributeKey<String> TASK_QUEUE_KEY = AttributeKey.stringKey("temporal.task_queue");
   private static final AttributeKey<String> STATUS_KEY = AttributeKey.stringKey("temporal.status");
@@ -56,10 +60,17 @@ public class ParseableEmitter implements AutoCloseable {
   private final OpenTelemetrySdk sdk;
   private final Tracer tracer;
   private final Logger logger;
+  // Maps workflowId to active workflow spans so activity spans can be parented correctly.
+  private final ConcurrentHashMap<String, Span> activeWorkflowSpans = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, Span> activeActivitySpans = new ConcurrentHashMap<>();
 
   public ParseableEmitter(ParseableConfig config) {
+    this(config, buildSdk(config));
+  }
+
+  ParseableEmitter(ParseableConfig config, OpenTelemetrySdk sdk) {
     this.config = config;
-    this.sdk = buildSdk(config);
+    this.sdk = sdk;
     this.tracer = sdk.getTracerProvider().get(INSTRUMENTATION_SCOPE, Version.PLUGIN_VERSION);
     this.logger = sdk.getSdkLoggerProvider().get(INSTRUMENTATION_SCOPE);
   }
@@ -82,7 +93,8 @@ public class ParseableEmitter implements AutoCloseable {
       String status,
       String errorMessage) {
 
-    String spanName = "workflow." + workflowType + "." + status;
+    String spanName = "workflow." + workflowType;
+    String logBody = spanName + "." + status;
     Attributes attrs = Attributes.builder()
         .put(WORKFLOW_ID_KEY, workflowId)
         .put(WORKFLOW_TYPE_KEY, workflowType)
@@ -92,8 +104,18 @@ public class ParseableEmitter implements AutoCloseable {
         .put(SDK_KEY, "java")
         .build();
 
-    emitSpan(spanName, SpanKind.INTERNAL, attrs, errorMessage);
-    emitLog(spanName, status, attrs, errorMessage);
+    if ("started".equals(status)) {
+      Span span = startSpan(spanName, SpanKind.INTERNAL, Context.root(), attrs);
+      activeWorkflowSpans.put(workflowId, span);
+    } else {
+      Span span = activeWorkflowSpans.remove(workflowId);
+      if (span != null) {
+        finishSpan(span, attrs, errorMessage);
+      } else {
+        emitSpan(spanName, SpanKind.INTERNAL, Context.root(), attrs, errorMessage);
+      }
+    }
+    emitLog(logBody, status, attrs, errorMessage);
   }
 
   /**
@@ -111,10 +133,32 @@ public class ParseableEmitter implements AutoCloseable {
       String taskQueue,
       String status,
       String errorMessage) {
+    emitActivityEvent(workflowId, activityType, activityType, taskQueue, status, errorMessage);
+  }
 
-    String spanName = "activity." + activityType + "." + status;
+  /**
+   * Emits an activity lifecycle event (start / complete / fail).
+   *
+   * @param workflowId   Parent workflow ID
+   * @param activityId   Temporal activity ID
+   * @param activityType Activity class/type name
+   * @param taskQueue    Task queue name
+   * @param status       "started" | "completed" | "failed"
+   * @param errorMessage nullable; only set when status == "failed"
+   */
+  public void emitActivityEvent(
+      String workflowId,
+      String activityId,
+      String activityType,
+      String taskQueue,
+      String status,
+      String errorMessage) {
+
+    String spanName = "activity." + activityType;
+    String logBody = spanName + "." + status;
     Attributes attrs = Attributes.builder()
         .put(WORKFLOW_ID_KEY, workflowId)
+        .put(ACTIVITY_ID_KEY, activityId)
         .put(ACTIVITY_TYPE_KEY, activityType)
         .put(TASK_QUEUE_KEY, taskQueue)
         .put(STATUS_KEY, status)
@@ -122,14 +166,44 @@ public class ParseableEmitter implements AutoCloseable {
         .put(SDK_KEY, "java")
         .build();
 
-    emitSpan(spanName, SpanKind.INTERNAL, attrs, errorMessage);
-    emitLog(spanName, status, attrs, errorMessage);
+    String activityKey = activityKey(workflowId, activityId);
+    Span parentSpan = activeWorkflowSpans.get(workflowId);
+    Context parent = parentSpan != null
+        ? Context.root().with(parentSpan)
+        : Context.root();
+    if ("started".equals(status)) {
+      Span span = startSpan(spanName, SpanKind.INTERNAL, parent, attrs);
+      activeActivitySpans.put(activityKey, span);
+    } else {
+      Span span = activeActivitySpans.remove(activityKey);
+      if (span != null) {
+        finishSpan(span, attrs, errorMessage);
+      } else {
+        emitSpan(spanName, SpanKind.INTERNAL, parent, attrs, errorMessage);
+      }
+    }
+    emitLog(logBody, status, attrs, errorMessage);
   }
 
   // ── Internal helpers ──────────────────────────────────────────────────────
 
-  private void emitSpan(String name, SpanKind kind, Attributes attrs, String errorMessage) {
-    Span span = tracer.spanBuilder(name).setSpanKind(kind).startSpan();
+  private SpanContext emitSpan(
+      String name, SpanKind kind, Context parentContext, Attributes attrs, String errorMessage) {
+    Span span = startSpan(name, kind, parentContext, attrs);
+    finishSpan(span, attrs, errorMessage);
+    return span.getSpanContext();
+  }
+
+  private Span startSpan(String name, SpanKind kind, Context parentContext, Attributes attrs) {
+    Span span = tracer.spanBuilder(name)
+        .setSpanKind(kind)
+        .setParent(parentContext)
+        .startSpan();
+    span.setAllAttributes(attrs);
+    return span;
+  }
+
+  private void finishSpan(Span span, Attributes attrs, String errorMessage) {
     try {
       span.setAllAttributes(attrs);
       if (errorMessage != null) {
@@ -213,6 +287,10 @@ public class ParseableEmitter implements AutoCloseable {
   private static String basicAuthHeader(String username, String password) {
     String credentials = username + ":" + password;
     return "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes());
+  }
+
+  private static String activityKey(String workflowId, String activityId) {
+    return workflowId + ":" + activityId;
   }
 
   @Override

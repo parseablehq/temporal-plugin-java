@@ -39,9 +39,9 @@ implementation 'com.parseable:temporal-parseable:0.1.0'
 Parseable requires streams to exist before ingestion. Create them once with:
 
 ```bash
-export PARSEABLE_ENDPOINT=https://your-parseable:8000
-export PARSEABLE_USERNAME=admin
-export PARSEABLE_PASSWORD=password
+export PARSEABLE_ENDPOINT=https://your-parseable.example.com
+export PARSEABLE_USERNAME=<your-username>
+export PARSEABLE_PASSWORD=<your-password>
 
 # Log stream
 curl -X PUT "$PARSEABLE_ENDPOINT/api/v1/logstream" \
@@ -60,9 +60,9 @@ curl -X PUT "$PARSEABLE_ENDPOINT/api/v1/logstream" \
 
 | Variable                            | Default                           | Description                            |
 | ----------------------------------- | --------------------------------- | -------------------------------------- |
-| `PARSEABLE_ENDPOINT`                | `https://demo.parseable.com:8000` | Base URL of your Parseable instance    |
-| `PARSEABLE_USERNAME`                | `admin`                           | HTTP Basic auth username               |
-| `PARSEABLE_PASSWORD`                | `password`                        | HTTP Basic auth password               |
+| `PARSEABLE_ENDPOINT`                | **required**                      | Base URL of your Parseable instance    |
+| `PARSEABLE_USERNAME`                | **required**                      | HTTP Basic auth username               |
+| `PARSEABLE_PASSWORD`                | **required**                      | HTTP Basic auth password               |
 | `PARSEABLE_LOG_STREAM`              | `temporal-logs`                   | Stream name for log records            |
 | `PARSEABLE_TRACE_STREAM`            | `temporal-traces`                 | Stream name for trace spans            |
 | `PARSEABLE_TEMPORAL_HOST`           | `localhost:7233`                  | Temporal server gRPC address           |
@@ -78,30 +78,24 @@ curl -X PUT "$PARSEABLE_ENDPOINT/api/v1/logstream" \
 import com.parseable.temporal.ParseableConfig;
 import com.parseable.temporal.ParseablePlugin;
 import io.temporal.client.WorkflowClient;
-import io.temporal.client.WorkflowClientOptions;
 import io.temporal.serviceclient.WorkflowServiceStubs;
 import io.temporal.serviceclient.WorkflowServiceStubsOptions;
 import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
-import io.temporal.worker.WorkerOptions;
 
-ParseableConfig config = ParseableConfig.fromEnv();
-ParseablePlugin plugin = new ParseablePlugin(config);
+ParseablePlugin plugin = new ParseablePlugin(ParseableConfig.fromEnv());
 
 // Register a shutdown hook so in-flight telemetry is flushed before exit
 Runtime.getRuntime().addShutdownHook(new Thread(plugin::close));
 
 WorkflowServiceStubs stubs = WorkflowServiceStubs.newServiceStubs(
-    plugin.configureServiceStubOptions(WorkflowServiceStubsOptions.newBuilder()).build());
+    WorkflowServiceStubsOptions.newBuilder().setPlugins(plugin).build());
 
-WorkflowClient client = WorkflowClient.newInstance(stubs,
-    plugin.configureClientOptions(WorkflowClientOptions.newBuilder()).build());
+WorkflowClient client = WorkflowClient.newInstance(stubs);
 
 WorkerFactory factory = WorkerFactory.newInstance(client);
 
-Worker worker = factory.newWorker(
-    "my-task-queue",
-    plugin.configureWorkerOptions(WorkerOptions.newBuilder()).build());
+Worker worker = factory.newWorker("my-task-queue");
 
 worker.registerWorkflowImplementationTypes(MyWorkflow.class);
 worker.registerActivitiesImplementations(new MyActivitiesImpl());
@@ -138,7 +132,7 @@ metadata:
 
 | Field            | Type   | Description                                     |
 | ---------------- | ------ | ----------------------------------------------- |
-| `name`           | string | Span name, e.g. `workflow.MyWorkflow.completed` |
+| `name`           | string | Span name, e.g. `workflow.MyWorkflow` or `activity.MyActivity` |
 | `kind`           | string | Always `INTERNAL`                               |
 | `status.code`    | string | `OK` or `ERROR`                                 |
 | `status.message` | string | Error message on `ERROR` spans                  |
