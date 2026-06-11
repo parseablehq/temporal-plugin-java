@@ -22,10 +22,15 @@ import io.opentelemetry.sdk.resources.Resource;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+
+import org.slf4j.LoggerFactory;
 
 /**
  * Shared emitter used by all Parseable interceptors.
@@ -56,13 +61,34 @@ public class ParseableEmitter implements AutoCloseable {
   private static final AttributeKey<String> PLUGIN_VERSION_KEY = AttributeKey.stringKey("temporal.plugin.version");
   private static final AttributeKey<String> SDK_KEY = AttributeKey.stringKey("temporal.plugin.sdk");
 
+  // Bounded to cap memory if terminal events are lost (worker crash, dropped interceptor call).
+  // 10k entries ≈ a few MB of Span refs; eldest evicted to keep map size capped.
+  private static final int MAX_ACTIVE_SPANS = 10_000;
+
+  private static final org.slf4j.Logger LOG = LoggerFactory.getLogger(ParseableEmitter.class);
+
   private final ParseableConfig config;
   private final OpenTelemetrySdk sdk;
   private final Tracer tracer;
   private final Logger logger;
   // Maps workflowId to active workflow spans so activity spans can be parented correctly.
-  private final ConcurrentHashMap<String, Span> activeWorkflowSpans = new ConcurrentHashMap<>();
-  private final ConcurrentHashMap<String, Span> activeActivitySpans = new ConcurrentHashMap<>();
+  private final Map<String, Span> activeWorkflowSpans = boundedSpanMap();
+  private final Map<String, Span> activeActivitySpans = boundedSpanMap();
+
+  private static Map<String, Span> boundedSpanMap() {
+    return Collections.synchronizedMap(new LinkedHashMap<String, Span>(256, 0.75f, false) {
+      @Override
+      protected boolean removeEldestEntry(Map.Entry<String, Span> eldest) {
+        if (size() > MAX_ACTIVE_SPANS) {
+          LOG.warn("active span map exceeded {} entries; evicting eldest (terminal event likely dropped)",
+              MAX_ACTIVE_SPANS);
+          eldest.getValue().end();
+          return true;
+        }
+        return false;
+      }
+    });
+  }
 
   public ParseableEmitter(ParseableConfig config) {
     this(config, buildSdk(config));
@@ -112,6 +138,8 @@ public class ParseableEmitter implements AutoCloseable {
       if (span != null) {
         finishSpan(span, attrs, errorMessage);
       } else {
+        LOG.warn("workflow terminal event '{}' for {} with no active span; emitting orphan",
+            status, workflowId);
         emitSpan(spanName, SpanKind.INTERNAL, Context.root(), attrs, errorMessage);
       }
     }
@@ -179,6 +207,8 @@ public class ParseableEmitter implements AutoCloseable {
       if (span != null) {
         finishSpan(span, attrs, errorMessage);
       } else {
+        LOG.warn("activity terminal event '{}' for {}/{} with no active span; emitting orphan",
+            status, workflowId, activityId);
         emitSpan(spanName, SpanKind.INTERNAL, parent, attrs, errorMessage);
       }
     }
@@ -286,7 +316,7 @@ public class ParseableEmitter implements AutoCloseable {
 
   private static String basicAuthHeader(String username, String password) {
     String credentials = username + ":" + password;
-    return "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes());
+    return "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
   }
 
   private static String activityKey(String workflowId, String activityId) {
