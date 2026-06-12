@@ -38,7 +38,7 @@ import io.temporal.worker.WorkerFactory;
  * <ul>
  *   <li>{@code PARSEABLE_LOG_STREAM} — default: {@code temporal-logs}</li>
  *   <li>{@code PARSEABLE_TRACE_STREAM} — default: {@code temporal-traces}</li>
- *   <li>{@code PARSEABLE_TEMPORAL_HOST} — default: {@code localhost:7233}</li>
+ *   <li>{@code TEMPORAL_TARGET} — default: {@code localhost:7233}</li>
  * </ul>
  */
 public final class Worker {
@@ -47,10 +47,14 @@ public final class Worker {
 
   public static void main(String[] args) throws InterruptedException {
     ParseablePlugin plugin = new ParseablePlugin(ParseableConfig.fromEnv());
+    String temporalTarget = System.getenv().getOrDefault("TEMPORAL_TARGET", "localhost:7233");
     Runtime.getRuntime().addShutdownHook(new Thread(plugin::close));
 
     WorkflowServiceStubs stubs = WorkflowServiceStubs.newServiceStubs(
-        WorkflowServiceStubsOptions.newBuilder().setPlugins(plugin).build());
+        WorkflowServiceStubsOptions.newBuilder()
+            .setTarget(temporalTarget)
+            .setPlugins(plugin)
+            .build());
 
     WorkflowClient client = WorkflowClient.newInstance(stubs);
 

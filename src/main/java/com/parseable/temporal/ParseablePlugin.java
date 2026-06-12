@@ -1,11 +1,12 @@
 package com.parseable.temporal;
 
 import com.parseable.temporal.interceptors.ParseableWorkerInterceptor;
+import com.parseable.temporal.interceptors.ParseableWorkflowClientInterceptor;
 
 import io.temporal.client.WorkflowClientOptions;
 import io.temporal.common.SimplePlugin;
 import io.temporal.common.interceptors.WorkerInterceptor;
-import io.temporal.serviceclient.WorkflowServiceStubsOptions;
+import io.temporal.common.interceptors.WorkflowClientInterceptor;
 import io.temporal.worker.WorkerFactoryOptions;
 
 import javax.annotation.Nonnull;
@@ -17,7 +18,7 @@ import java.util.List;
  * Entry point for the Parseable Temporal plugin (Java SDK).
  *
  * <p>Extends {@link SimplePlugin} so it integrates with the standard Temporal plugin system —
- * register it once and it configures service stubs, client, and worker factory automatically.
+ * register it once and it configures client and worker factory telemetry hooks automatically.
  *
  * <h2>Quick start</h2>
  *
@@ -44,6 +45,7 @@ public final class ParseablePlugin extends SimplePlugin implements AutoCloseable
   private final ParseableConfig config;
   private final ParseableEmitter emitter;
   private final ParseableWorkerInterceptor workerInterceptor;
+  private final ParseableWorkflowClientInterceptor workflowClientInterceptor;
 
   public ParseablePlugin(ParseableConfig config) {
     this(config, new ParseableEmitter(config));
@@ -54,19 +56,27 @@ public final class ParseablePlugin extends SimplePlugin implements AutoCloseable
     this.config = config;
     this.emitter = emitter;
     this.workerInterceptor = new ParseableWorkerInterceptor(emitter);
+    this.workflowClientInterceptor = new ParseableWorkflowClientInterceptor(emitter);
   }
 
   // ── SimplePlugin overrides ────────────────────────────────────────────────
 
   @Override
-  public void configureServiceStubs(@Nonnull WorkflowServiceStubsOptions.Builder builder) {
-    builder.setTarget(config.getTemporalHost());
-  }
-
-  @Override
   public void configureWorkflowClient(@Nonnull WorkflowClientOptions.Builder builder) {
     super.configureWorkflowClient(builder);
     builder.setNamespace(config.getTemporalNamespace());
+    WorkflowClientInterceptor[] existing = builder.build().getInterceptors();
+    if (existing != null) {
+      for (WorkflowClientInterceptor interceptor : existing) {
+        if (interceptor == workflowClientInterceptor) {
+          return;
+        }
+      }
+    }
+    List<WorkflowClientInterceptor> combined = new ArrayList<>(
+        existing != null ? Arrays.asList(existing) : new ArrayList<>());
+    combined.add(workflowClientInterceptor);
+    builder.setInterceptors(combined.toArray(new WorkflowClientInterceptor[0]));
   }
 
   @Override
@@ -91,6 +101,9 @@ public final class ParseablePlugin extends SimplePlugin implements AutoCloseable
   public ParseableConfig getConfig() { return config; }
   public ParseableEmitter getEmitter() { return emitter; }
   public ParseableWorkerInterceptor getWorkerInterceptor() { return workerInterceptor; }
+  public ParseableWorkflowClientInterceptor getWorkflowClientInterceptor() {
+    return workflowClientInterceptor;
+  }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 

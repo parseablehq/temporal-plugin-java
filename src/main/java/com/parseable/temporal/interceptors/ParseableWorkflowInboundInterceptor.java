@@ -11,7 +11,8 @@ import io.temporal.workflow.WorkflowInfo;
 /**
  * Intercepts inbound workflow executions.
  *
- * <p>Emits {@code started}, {@code completed}, and {@code failed} events to Parseable.
+ * <p>Emits {@code started}, {@code completed}, {@code failed}, and {@code canceled} events to
+ * Parseable.
  * All emissions are guarded with {@link Workflow#isReplaying()} to avoid duplicate records
  * when Temporal replays workflow history.
  */
@@ -36,23 +37,28 @@ public final class ParseableWorkflowInboundInterceptor
   public WorkflowOutput execute(WorkflowInput input) {
     WorkflowInfo info = Workflow.getInfo();
     String workflowId = info.getWorkflowId();
+    String runId = info.getRunId();
     String workflowType = info.getWorkflowType();
     String taskQueue = info.getTaskQueue();
 
     // Emit "started" only on the first execution, not on replay
     if (!Workflow.isReplaying()) {
-      emitter.emitWorkflowEvent(workflowId, workflowType, taskQueue, "started", null);
+      emitter.emitWorkflowEvent(
+          workflowId, runId, workflowType, taskQueue, LifecycleStatus.STARTED, null);
     }
 
     try {
       WorkflowOutput output = super.execute(input);
       if (!Workflow.isReplaying()) {
-        emitter.emitWorkflowEvent(workflowId, workflowType, taskQueue, "completed", null);
+        emitter.emitWorkflowEvent(
+            workflowId, runId, workflowType, taskQueue, LifecycleStatus.COMPLETED, null);
       }
       return output;
     } catch (Exception e) {
       if (!Workflow.isReplaying()) {
-        emitter.emitWorkflowEvent(workflowId, workflowType, taskQueue, "failed", e.getMessage());
+        emitter.emitWorkflowEvent(
+            workflowId, runId, workflowType, taskQueue, LifecycleStatus.fromThrowable(e),
+            e.getMessage());
       }
       throw e;
     }

@@ -8,7 +8,8 @@ import io.temporal.common.interceptors.ActivityInboundCallsInterceptor;
 import io.temporal.common.interceptors.ActivityInboundCallsInterceptorBase;
 
 /**
- * Intercepts inbound activity executions and emits start/complete/failed events to Parseable.
+ * Intercepts inbound activity executions and emits start/complete/failed/canceled events to
+ * Parseable.
  */
 public final class ParseableActivityInboundInterceptor
     extends ActivityInboundCallsInterceptorBase {
@@ -32,17 +33,22 @@ public final class ParseableActivityInboundInterceptor
   public ActivityOutput execute(ActivityInput input) {
     ActivityInfo info = context.getInfo();
     String workflowId = info.getWorkflowId();
+    String runId = info.getWorkflowRunId();
     String activityId = info.getActivityId();
     String activityType = info.getActivityType();
     String taskQueue = info.getActivityTaskQueue();
 
-    emitter.emitActivityEvent(workflowId, activityId, activityType, taskQueue, "started", null);
+    emitter.emitActivityEvent(
+        workflowId, runId, activityId, activityType, taskQueue, LifecycleStatus.STARTED, null);
     try {
       ActivityOutput output = super.execute(input);
-      emitter.emitActivityEvent(workflowId, activityId, activityType, taskQueue, "completed", null);
+      emitter.emitActivityEvent(
+          workflowId, runId, activityId, activityType, taskQueue, LifecycleStatus.COMPLETED, null);
       return output;
     } catch (Exception e) {
-      emitter.emitActivityEvent(workflowId, activityId, activityType, taskQueue, "failed", e.getMessage());
+      emitter.emitActivityEvent(
+          workflowId, runId, activityId, activityType, taskQueue, LifecycleStatus.fromThrowable(e),
+          e.getMessage());
       throw e;
     }
   }

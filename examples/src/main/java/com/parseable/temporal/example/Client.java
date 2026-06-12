@@ -21,10 +21,14 @@ public final class Client {
 
   public static void main(String[] args) {
     ParseablePlugin plugin = new ParseablePlugin(ParseableConfig.fromEnv());
+    String temporalTarget = System.getenv().getOrDefault("TEMPORAL_TARGET", "localhost:7233");
 
     try {
       WorkflowServiceStubs stubs = WorkflowServiceStubs.newServiceStubs(
-          WorkflowServiceStubsOptions.newBuilder().setPlugins(plugin).build());
+          WorkflowServiceStubsOptions.newBuilder()
+              .setTarget(temporalTarget)
+              .setPlugins(plugin)
+              .build());
 
       WorkflowClient client = WorkflowClient.newInstance(stubs);
 

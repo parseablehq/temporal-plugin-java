@@ -5,6 +5,7 @@ import com.parseable.temporal.version.Version;
 
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.logs.Severity;
 import io.opentelemetry.api.trace.Span;
@@ -53,17 +54,27 @@ public class ParseableEmitter implements AutoCloseable {
 
   // Span attribute keys
   private static final AttributeKey<String> WORKFLOW_ID_KEY = AttributeKey.stringKey("temporal.workflow.id");
+  private static final AttributeKey<String> WORKFLOW_RUN_ID_KEY =
+      AttributeKey.stringKey("temporal.workflow.run_id");
   private static final AttributeKey<String> WORKFLOW_TYPE_KEY = AttributeKey.stringKey("temporal.workflow.type");
   private static final AttributeKey<String> ACTIVITY_ID_KEY = AttributeKey.stringKey("temporal.activity.id");
   private static final AttributeKey<String> ACTIVITY_TYPE_KEY = AttributeKey.stringKey("temporal.activity.type");
+  private static final AttributeKey<String> OPERATION_KEY = AttributeKey.stringKey("temporal.operation");
+  private static final AttributeKey<String> OPERATION_KIND_KEY =
+      AttributeKey.stringKey("temporal.operation.kind");
+  private static final AttributeKey<String> SIGNAL_NAME_KEY = AttributeKey.stringKey("temporal.signal.name");
+  private static final AttributeKey<String> QUERY_TYPE_KEY = AttributeKey.stringKey("temporal.query.type");
+  private static final AttributeKey<String> UPDATE_NAME_KEY = AttributeKey.stringKey("temporal.update.name");
+  private static final AttributeKey<String> UPDATE_ID_KEY = AttributeKey.stringKey("temporal.update.id");
   private static final AttributeKey<String> TASK_QUEUE_KEY = AttributeKey.stringKey("temporal.task_queue");
   private static final AttributeKey<String> STATUS_KEY = AttributeKey.stringKey("temporal.status");
+  private static final AttributeKey<Long> DURATION_MS_KEY = AttributeKey.longKey("temporal.duration_ms");
   private static final AttributeKey<String> PLUGIN_VERSION_KEY = AttributeKey.stringKey("temporal.plugin.version");
   private static final AttributeKey<String> SDK_KEY = AttributeKey.stringKey("temporal.plugin.sdk");
 
   // Bounded to cap memory if terminal events are lost (worker crash, dropped interceptor call).
-  // 10k entries ≈ a few MB of Span refs; eldest evicted to keep map size capped.
-  private static final int MAX_ACTIVE_SPANS = 10_000;
+  // 10k entries is enough for correlation while keeping the cache small.
+  private static final int MAX_SPAN_CONTEXTS = 10_000;
 
   private static final org.slf4j.Logger LOG = LoggerFactory.getLogger(ParseableEmitter.class);
 
@@ -71,18 +82,16 @@ public class ParseableEmitter implements AutoCloseable {
   private final OpenTelemetrySdk sdk;
   private final Tracer tracer;
   private final Logger logger;
-  // Maps workflowId to active workflow spans so activity spans can be parented correctly.
-  private final Map<String, Span> activeWorkflowSpans = boundedSpanMap();
-  private final Map<String, Span> activeActivitySpans = boundedSpanMap();
+  // Maps workflowId:runId to exported span contexts so later events can be parented.
+  private final Map<String, SpanContext> workflowSpanContexts = boundedSpanContextMap();
+  private final Map<String, SpanContext> activitySpanContexts = boundedSpanContextMap();
 
-  private static Map<String, Span> boundedSpanMap() {
-    return Collections.synchronizedMap(new LinkedHashMap<String, Span>(256, 0.75f, false) {
+  private static Map<String, SpanContext> boundedSpanContextMap() {
+    return Collections.synchronizedMap(new LinkedHashMap<String, SpanContext>(256, 0.75f, false) {
       @Override
-      protected boolean removeEldestEntry(Map.Entry<String, Span> eldest) {
-        if (size() > MAX_ACTIVE_SPANS) {
-          LOG.warn("active span map exceeded {} entries; evicting eldest (terminal event likely dropped)",
-              MAX_ACTIVE_SPANS);
-          eldest.getValue().end();
+      protected boolean removeEldestEntry(Map.Entry<String, SpanContext> eldest) {
+        if (size() > MAX_SPAN_CONTEXTS) {
+          LOG.warn("span context cache exceeded {} entries; evicting eldest", MAX_SPAN_CONTEXTS);
           return true;
         }
         return false;
@@ -109,8 +118,8 @@ public class ParseableEmitter implements AutoCloseable {
    * @param workflowId   Temporal workflow ID
    * @param workflowType Workflow class/type name
    * @param taskQueue    Task queue name
-   * @param status       "started" | "completed" | "failed"
-   * @param errorMessage nullable; only set when status == "failed"
+   * @param status       "started" | "completed" | "failed" | "canceled"
+   * @param errorMessage nullable; only used when status == "failed"
    */
   public void emitWorkflowEvent(
       String workflowId,
@@ -118,30 +127,50 @@ public class ParseableEmitter implements AutoCloseable {
       String taskQueue,
       String status,
       String errorMessage) {
+    emitWorkflowEvent(workflowId, null, workflowType, taskQueue, status, errorMessage);
+  }
+
+  /**
+   * Emits a workflow lifecycle event (start / complete / fail) as both a span and a log record.
+   *
+   * @param workflowId   Temporal workflow ID
+   * @param runId        Temporal workflow run ID
+   * @param workflowType Workflow class/type name
+   * @param taskQueue    Task queue name
+   * @param status       "started" | "completed" | "failed" | "canceled"
+   * @param errorMessage nullable; only used when status == "failed"
+   */
+  public void emitWorkflowEvent(
+      String workflowId,
+      String runId,
+      String workflowType,
+      String taskQueue,
+      String status,
+      String errorMessage) {
 
     String spanName = "workflow." + workflowType;
     String logBody = spanName + "." + status;
-    Attributes attrs = Attributes.builder()
+    AttributesBuilder attrsBuilder = Attributes.builder()
         .put(WORKFLOW_ID_KEY, workflowId)
         .put(WORKFLOW_TYPE_KEY, workflowType)
         .put(TASK_QUEUE_KEY, taskQueue)
         .put(STATUS_KEY, status)
         .put(PLUGIN_VERSION_KEY, Version.PLUGIN_VERSION)
-        .put(SDK_KEY, "java")
-        .build();
+        .put(SDK_KEY, "java");
+    if (runId != null) {
+      attrsBuilder.put(WORKFLOW_RUN_ID_KEY, runId);
+    }
+    Attributes attrs = attrsBuilder.build();
 
+    String workflowKey = workflowKey(workflowId, runId);
+    SpanContext parentSpanContext = workflowSpanContexts.get(workflowKey);
+    Context parent = contextWithSpan(parentSpanContext);
+    SpanContext emittedSpanContext = emitSpan(
+        spanName, SpanKind.INTERNAL, parent, attrs, status, errorMessage);
     if ("started".equals(status)) {
-      Span span = startSpan(spanName, SpanKind.INTERNAL, Context.root(), attrs);
-      activeWorkflowSpans.put(workflowId, span);
+      workflowSpanContexts.put(workflowKey, emittedSpanContext);
     } else {
-      Span span = activeWorkflowSpans.remove(workflowId);
-      if (span != null) {
-        finishSpan(span, attrs, errorMessage);
-      } else {
-        LOG.warn("workflow terminal event '{}' for {} with no active span; emitting orphan",
-            status, workflowId);
-        emitSpan(spanName, SpanKind.INTERNAL, Context.root(), attrs, errorMessage);
-      }
+      workflowSpanContexts.remove(workflowKey);
     }
     emitLog(logBody, status, attrs, errorMessage);
   }
@@ -152,8 +181,8 @@ public class ParseableEmitter implements AutoCloseable {
    * @param workflowId   Parent workflow ID
    * @param activityType Activity class/type name
    * @param taskQueue    Task queue name
-   * @param status       "started" | "completed" | "failed"
-   * @param errorMessage nullable; only set when status == "failed"
+   * @param status       "started" | "completed" | "failed" | "canceled"
+   * @param errorMessage nullable; only used when status == "failed"
    */
   public void emitActivityEvent(
       String workflowId,
@@ -161,7 +190,7 @@ public class ParseableEmitter implements AutoCloseable {
       String taskQueue,
       String status,
       String errorMessage) {
-    emitActivityEvent(workflowId, activityType, activityType, taskQueue, status, errorMessage);
+    emitActivityEvent(workflowId, null, activityType, activityType, taskQueue, status, errorMessage);
   }
 
   /**
@@ -171,8 +200,8 @@ public class ParseableEmitter implements AutoCloseable {
    * @param activityId   Temporal activity ID
    * @param activityType Activity class/type name
    * @param taskQueue    Task queue name
-   * @param status       "started" | "completed" | "failed"
-   * @param errorMessage nullable; only set when status == "failed"
+   * @param status       "started" | "completed" | "failed" | "canceled"
+   * @param errorMessage nullable; only used when status == "failed"
    */
   public void emitActivityEvent(
       String workflowId,
@@ -181,47 +210,123 @@ public class ParseableEmitter implements AutoCloseable {
       String taskQueue,
       String status,
       String errorMessage) {
+    emitActivityEvent(workflowId, null, activityId, activityType, taskQueue, status, errorMessage);
+  }
+
+  /**
+   * Emits an activity lifecycle event (start / complete / fail).
+   *
+   * @param workflowId   Parent workflow ID
+   * @param runId        Parent workflow run ID
+   * @param activityId   Temporal activity ID
+   * @param activityType Activity class/type name
+   * @param taskQueue    Task queue name
+   * @param status       "started" | "completed" | "failed" | "canceled"
+   * @param errorMessage nullable; only used when status == "failed"
+   */
+  public void emitActivityEvent(
+      String workflowId,
+      String runId,
+      String activityId,
+      String activityType,
+      String taskQueue,
+      String status,
+      String errorMessage) {
 
     String spanName = "activity." + activityType;
     String logBody = spanName + "." + status;
-    Attributes attrs = Attributes.builder()
+    AttributesBuilder attrsBuilder = Attributes.builder()
         .put(WORKFLOW_ID_KEY, workflowId)
         .put(ACTIVITY_ID_KEY, activityId)
         .put(ACTIVITY_TYPE_KEY, activityType)
         .put(TASK_QUEUE_KEY, taskQueue)
         .put(STATUS_KEY, status)
         .put(PLUGIN_VERSION_KEY, Version.PLUGIN_VERSION)
-        .put(SDK_KEY, "java")
-        .build();
-
-    String activityKey = activityKey(workflowId, activityId);
-    Span parentSpan = activeWorkflowSpans.get(workflowId);
-    Context parent = parentSpan != null
-        ? Context.root().with(parentSpan)
-        : Context.root();
-    if ("started".equals(status)) {
-      Span span = startSpan(spanName, SpanKind.INTERNAL, parent, attrs);
-      activeActivitySpans.put(activityKey, span);
-    } else {
-      Span span = activeActivitySpans.remove(activityKey);
-      if (span != null) {
-        finishSpan(span, attrs, errorMessage);
-      } else {
-        LOG.warn("activity terminal event '{}' for {}/{} with no active span; emitting orphan",
-            status, workflowId, activityId);
-        emitSpan(spanName, SpanKind.INTERNAL, parent, attrs, errorMessage);
-      }
+        .put(SDK_KEY, "java");
+    if (runId != null) {
+      attrsBuilder.put(WORKFLOW_RUN_ID_KEY, runId);
     }
+    Attributes attrs = attrsBuilder.build();
+
+    String activityKey = activityKey(workflowId, runId, activityId);
+    SpanContext parentSpanContext = activitySpanContexts.get(activityKey);
+    if (parentSpanContext == null) {
+      parentSpanContext = workflowSpanContexts.get(workflowKey(workflowId, runId));
+    }
+    Context parent = contextWithSpan(parentSpanContext);
+    SpanContext emittedSpanContext = emitSpan(
+        spanName, SpanKind.INTERNAL, parent, attrs, status, errorMessage);
+    if ("started".equals(status)) {
+      activitySpanContexts.put(activityKey, emittedSpanContext);
+    } else {
+      activitySpanContexts.remove(activityKey);
+    }
+    emitLog(logBody, status, attrs, errorMessage);
+  }
+
+  /**
+   * Emits a client-side Temporal operation such as start, signal, query, update, cancel, or
+   * terminate. Arguments and payloads are intentionally excluded.
+   */
+  public void emitClientOperation(
+      String operation,
+      String workflowId,
+      String runId,
+      String workflowType,
+      String taskQueue,
+      String signalName,
+      String queryType,
+      String updateName,
+      String updateId,
+      String status,
+      String errorMessage,
+      long startEpochNanos,
+      long endEpochNanos) {
+
+    String spanName = "temporal.client." + operation;
+    String logBody = spanName + "." + status;
+    Attributes attrs = clientOperationAttributes(
+        operation, workflowId, runId, workflowType, taskQueue, signalName, queryType, updateName,
+        updateId, status, durationMillis(startEpochNanos, endEpochNanos));
+
+    emitSpan(
+        spanName, SpanKind.CLIENT, Context.root(), attrs, status, errorMessage, startEpochNanos,
+        endEpochNanos);
     emitLog(logBody, status, attrs, errorMessage);
   }
 
   // ── Internal helpers ──────────────────────────────────────────────────────
 
   private SpanContext emitSpan(
-      String name, SpanKind kind, Context parentContext, Attributes attrs, String errorMessage) {
+      String name,
+      SpanKind kind,
+      Context parentContext,
+      Attributes attrs,
+      String status,
+      String errorMessage) {
     Span span = startSpan(name, kind, parentContext, attrs);
-    finishSpan(span, attrs, errorMessage);
+    finishSpan(span, attrs, status, errorMessage);
     return span.getSpanContext();
+  }
+
+  private SpanContext emitSpan(
+      String name,
+      SpanKind kind,
+      Context parentContext,
+      Attributes attrs,
+      String status,
+      String errorMessage,
+      long startEpochNanos,
+      long endEpochNanos) {
+    Span span = startSpan(name, kind, parentContext, attrs, startEpochNanos);
+    finishSpan(span, attrs, status, errorMessage, endEpochNanos);
+    return span.getSpanContext();
+  }
+
+  private Context contextWithSpan(SpanContext spanContext) {
+    return spanContext != null && spanContext.isValid()
+        ? Context.root().with(Span.wrap(spanContext))
+        : Context.root();
   }
 
   private Span startSpan(String name, SpanKind kind, Context parentContext, Attributes attrs) {
@@ -233,17 +338,46 @@ public class ParseableEmitter implements AutoCloseable {
     return span;
   }
 
-  private void finishSpan(Span span, Attributes attrs, String errorMessage) {
+  private Span startSpan(
+      String name, SpanKind kind, Context parentContext, Attributes attrs, long startEpochNanos) {
+    Span span = tracer.spanBuilder(name)
+        .setSpanKind(kind)
+        .setParent(parentContext)
+        .setStartTimestamp(startEpochNanos, TimeUnit.NANOSECONDS)
+        .startSpan();
+    span.setAllAttributes(attrs);
+    return span;
+  }
+
+  private void finishSpan(Span span, Attributes attrs, String status, String errorMessage) {
     try {
-      span.setAllAttributes(attrs);
+      setTerminalAttributes(span, attrs, status, errorMessage);
+    } finally {
+      span.end();
+    }
+  }
+
+  private void finishSpan(
+      Span span, Attributes attrs, String status, String errorMessage, long endEpochNanos) {
+    try {
+      setTerminalAttributes(span, attrs, status, errorMessage);
+    } finally {
+      span.end(endEpochNanos, TimeUnit.NANOSECONDS);
+    }
+  }
+
+  private void setTerminalAttributes(
+      Span span, Attributes attrs, String status, String errorMessage) {
+    span.setAllAttributes(attrs);
+    if ("failed".equals(status)) {
       if (errorMessage != null) {
         span.setStatus(StatusCode.ERROR, errorMessage);
         span.setAttribute(AttributeKey.stringKey("error.message"), errorMessage);
       } else {
-        span.setStatus(StatusCode.OK);
+        span.setStatus(StatusCode.ERROR);
       }
-    } finally {
-      span.end();
+    } else {
+      span.setStatus(StatusCode.OK);
     }
   }
 
@@ -253,10 +387,51 @@ public class ParseableEmitter implements AutoCloseable {
         .setSeverity(severity)
         .setBody(body)
         .setAllAttributes(attrs);
-    if (errorMessage != null) {
+    if ("failed".equals(status) && errorMessage != null) {
       builder.setAttribute(AttributeKey.stringKey("error.message"), errorMessage);
     }
     builder.emit();
+  }
+
+  private Attributes clientOperationAttributes(
+      String operation,
+      String workflowId,
+      String runId,
+      String workflowType,
+      String taskQueue,
+      String signalName,
+      String queryType,
+      String updateName,
+      String updateId,
+      String status,
+      long durationMs) {
+    AttributesBuilder builder = Attributes.builder()
+        .put(OPERATION_KEY, operation)
+        .put(OPERATION_KIND_KEY, "client")
+        .put(STATUS_KEY, status)
+        .put(DURATION_MS_KEY, durationMs)
+        .put(PLUGIN_VERSION_KEY, Version.PLUGIN_VERSION)
+        .put(SDK_KEY, "java");
+    putIfPresent(builder, WORKFLOW_ID_KEY, workflowId);
+    putIfPresent(builder, WORKFLOW_RUN_ID_KEY, runId);
+    putIfPresent(builder, WORKFLOW_TYPE_KEY, workflowType);
+    putIfPresent(builder, TASK_QUEUE_KEY, taskQueue);
+    putIfPresent(builder, SIGNAL_NAME_KEY, signalName);
+    putIfPresent(builder, QUERY_TYPE_KEY, queryType);
+    putIfPresent(builder, UPDATE_NAME_KEY, updateName);
+    putIfPresent(builder, UPDATE_ID_KEY, updateId);
+    return builder.build();
+  }
+
+  private static void putIfPresent(
+      AttributesBuilder builder, AttributeKey<String> key, String value) {
+    if (value != null && !value.isEmpty()) {
+      builder.put(key, value);
+    }
+  }
+
+  private static long durationMillis(long startEpochNanos, long endEpochNanos) {
+    return TimeUnit.NANOSECONDS.toMillis(Math.max(0, endEpochNanos - startEpochNanos));
   }
 
   // ── SDK construction ──────────────────────────────────────────────────────
@@ -319,8 +494,12 @@ public class ParseableEmitter implements AutoCloseable {
     return "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
   }
 
-  private static String activityKey(String workflowId, String activityId) {
-    return workflowId + ":" + activityId;
+  private static String workflowKey(String workflowId, String runId) {
+    return workflowId + ":" + (runId != null ? runId : "");
+  }
+
+  private static String activityKey(String workflowId, String runId, String activityId) {
+    return workflowKey(workflowId, runId) + ":" + activityId;
   }
 
   @Override

@@ -40,7 +40,7 @@ public final class ParseableConfig {
   /** {@code PARSEABLE_TRACE_STREAM} — stream name for OTLP span records. */
   private final String traceStream;
 
-  /** {@code PARSEABLE_TEMPORAL_HOST} — Temporal server address. */
+  /** {@code PARSEABLE_TEMPORAL_HOST} — deprecated; configure Temporal stubs directly. */
   private final String temporalHost;
 
   /** {@code PARSEABLE_TEMPORAL_NAMESPACE} — Temporal namespace. */
@@ -155,6 +155,10 @@ public final class ParseableConfig {
     public Builder password(String val) { this.password = val; return this; }
     public Builder logStream(String val) { this.logStream = val; return this; }
     public Builder traceStream(String val) { this.traceStream = val; return this; }
+    /**
+     * Deprecated. Configure the Temporal target with
+     * {@code WorkflowServiceStubsOptions.Builder#setTarget(String)} instead.
+     */
     public Builder temporalHost(String val) { this.temporalHost = val; return this; }
     public Builder temporalNamespace(String val) { this.temporalNamespace = val; return this; }
     public Builder serviceName(String val) { this.serviceName = val; return this; }

@@ -65,7 +65,7 @@ curl -X PUT "$PARSEABLE_ENDPOINT/api/v1/logstream" \
 | `PARSEABLE_PASSWORD`                | **required**                      | HTTP Basic auth password               |
 | `PARSEABLE_LOG_STREAM`              | `temporal-logs`                   | Stream name for log records            |
 | `PARSEABLE_TRACE_STREAM`            | `temporal-traces`                 | Stream name for trace spans            |
-| `PARSEABLE_TEMPORAL_HOST`           | `localhost:7233`                  | Temporal server gRPC address           |
+| `PARSEABLE_TEMPORAL_HOST`           | Deprecated                        | Configure Temporal with `WorkflowServiceStubsOptions.setTarget(...)` |
 | `PARSEABLE_TEMPORAL_NAMESPACE`      | `default`                         | Temporal namespace                     |
 | `PARSEABLE_SERVICE_NAME`            | `temporal-worker`                 | OTel `service.name` resource attribute |
 | `PARSEABLE_BATCH_EXPORT_TIMEOUT_MS` | `5000`                            | Max ms to wait for a batch export      |
@@ -89,7 +89,10 @@ ParseablePlugin plugin = new ParseablePlugin(ParseableConfig.fromEnv());
 Runtime.getRuntime().addShutdownHook(new Thread(plugin::close));
 
 WorkflowServiceStubs stubs = WorkflowServiceStubs.newServiceStubs(
-    WorkflowServiceStubsOptions.newBuilder().setPlugins(plugin).build());
+    WorkflowServiceStubsOptions.newBuilder()
+        .setTarget("localhost:7233")
+        .setPlugins(plugin)
+        .build());
 
 WorkflowClient client = WorkflowClient.newInstance(stubs);
 
@@ -113,10 +116,18 @@ Every log record written to `temporal-logs` has the following fields:
 | `body`                    | string | Human-readable event description, e.g. `workflow.MyWorkflow.completed` |
 | `severity`                | string | `INFO` (success) or `ERROR` (failure)                                  |
 | `temporal.workflow.id`    | string | Workflow execution ID                                                  |
+| `temporal.workflow.run_id` | string | Workflow run ID                                                        |
 | `temporal.workflow.type`  | string | Workflow class / type name                                             |
 | `temporal.activity.type`  | string | Activity type name (activity events only)                              |
+| `temporal.operation`      | string | Client operation, e.g. `workflow.start` or `workflow.query`            |
+| `temporal.operation.kind` | string | `client` for client-side operations                                    |
+| `temporal.signal.name`    | string | Signal name (signal operations only)                                   |
+| `temporal.query.type`     | string | Query type (query operations only)                                     |
+| `temporal.update.name`    | string | Update name (update operations only)                                   |
+| `temporal.update.id`      | string | Update ID (update operations only)                                     |
 | `temporal.task_queue`     | string | Task queue name                                                        |
-| `temporal.status`         | string | `started` \| `completed` \| `failed`                                   |
+| `temporal.status`         | string | `started` \| `completed` \| `failed` \| `canceled`                     |
+| `temporal.duration_ms`    | integer | Client operation duration in milliseconds                             |
 | `error.message`           | string | Error message (only on `failed` events)                                |
 | `temporal.plugin.version` | string | Plugin version (e.g. `0.1.0`)                                          |
 | `temporal.plugin.sdk`     | string | Always `java`                                                          |
@@ -133,7 +144,7 @@ metadata:
 | Field            | Type   | Description                                     |
 | ---------------- | ------ | ----------------------------------------------- |
 | `name`           | string | Span name, e.g. `workflow.MyWorkflow` or `activity.MyActivity` |
-| `kind`           | string | Always `INTERNAL`                               |
+| `kind`           | string | `INTERNAL` for workflow/activity runs; `CLIENT` for client operations |
 | `status.code`    | string | `OK` or `ERROR`                                 |
 | `status.message` | string | Error message on `ERROR` spans                  |
 | `temporal.*`     | string | Same attributes as log schema above             |

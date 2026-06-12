@@ -33,9 +33,13 @@ implementation 'com.parseable:temporal-parseable:0.1.0'
 // 1. Create the plugin (reads PARSEABLE_* env vars)
 ParseablePlugin plugin = new ParseablePlugin(ParseableConfig.fromEnv());
 
-// 2. Connect to Temporal — register the plugin once on service stubs
+// 2. Connect to Temporal — configure the Temporal target normally,
+//    then register the plugin once on service stubs
 WorkflowServiceStubs stubs = WorkflowServiceStubs.newServiceStubs(
-    WorkflowServiceStubsOptions.newBuilder().setPlugins(plugin).build());
+    WorkflowServiceStubsOptions.newBuilder()
+        .setTarget("localhost:7233")
+        .setPlugins(plugin)
+        .build());
 
 WorkflowClient client = WorkflowClient.newInstance(stubs);
 
@@ -62,7 +66,7 @@ All settings can be set via environment variables or the `ParseableConfig.Builde
 | `PARSEABLE_PASSWORD`              | `.password(...)`            | **required**                         |
 | `PARSEABLE_LOG_STREAM`            | `.logStream(...)`           | `temporal-logs`                      |
 | `PARSEABLE_TRACE_STREAM`          | `.traceStream(...)`         | `temporal-traces`                    |
-| `PARSEABLE_TEMPORAL_HOST`         | `.temporalHost(...)`        | `localhost:7233`                     |
+| `PARSEABLE_TEMPORAL_HOST`         | `.temporalHost(...)`        | Deprecated; configure Temporal with `WorkflowServiceStubsOptions.setTarget(...)` |
 | `PARSEABLE_TEMPORAL_NAMESPACE`    | `.temporalNamespace(...)`   | `default`                            |
 | `PARSEABLE_SERVICE_NAME`          | `.serviceName(...)`         | `temporal-worker`                    |
 | `PARSEABLE_BATCH_EXPORT_TIMEOUT_MS` | `.batchExportTimeoutMs(...)` | `5000`                           |
@@ -161,6 +165,14 @@ src/test/java/com/parseable/temporal/
 
 **Replay safety.** Workflow events are guarded with `Workflow.isReplaying()`. When Temporal
 replays workflow history the guard suppresses emission — no duplicate logs or spans.
+
+**Restart tolerance.** Each lifecycle event emits its own closed span, keyed with workflow ID and
+run ID. In-memory span context is used only for best-effort parent/child correlation, so terminal
+events still export after a worker restart.
+
+**Client operations.** The workflow client interceptor records starts, signals, queries, updates,
+cancels, and terminations as short `CLIENT` spans/logs. It records operation names and workflow
+identifiers, but not arguments or payloads.
 
 **SanitizingSpanExporter.** Parseable's OTLP parser rejects spans containing array or map-typed
 attributes. `SanitizingSpanExporter` converts array attributes to comma-joined strings and drops
