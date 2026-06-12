@@ -153,22 +153,15 @@ class ParseableInterceptorTest {
 
     @Override
     public void emitWorkflowEvent(
-        String workflowId, String workflowType, String taskQueue,
+        String workflowId, String runId, String workflowType, String taskQueue,
         String status, String errorMessage) {
       events.add("workflow:" + workflowType + ":" + status);
     }
 
     @Override
     public void emitActivityEvent(
-        String workflowId, String activityType, String taskQueue,
-        String status, String errorMessage) {
-      events.add("activity:" + activityType + ":" + status);
-    }
-
-    @Override
-    public void emitActivityEvent(
-        String workflowId, String activityId, String activityType, String taskQueue,
-        String status, String errorMessage) {
+        String workflowId, String runId, String activityId, String activityType,
+        String taskQueue, String status, String errorMessage) {
       events.add("activity:" + activityId + ":" + activityType + ":" + status);
     }
   }
