@@ -72,6 +72,19 @@
       <scope>provided</scope>
     </dependency>
 
+    <!-- Temporal official OpenTracing interceptors -->
+    <dependency>
+      <groupId>io.temporal</groupId>
+      <artifactId>temporal-opentracing</artifactId>
+      <version>${temporal.version}</version>
+    </dependency>
+
+    <!-- OpenTracing -> OpenTelemetry bridge -->
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-opentracing-shim</artifactId>
+    </dependency>
+
     <!-- OpenTelemetry API + SDK -->
     <dependency>
       <groupId>io.opentelemetry</groupId>

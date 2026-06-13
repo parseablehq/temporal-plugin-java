@@ -94,12 +94,9 @@ pom.xml                                         # Maven build; publishes to Mave
 src/main/java/com/parseable/temporal/
 ├── ParseablePlugin.java                        # entry point — create one instance per worker
 ├── ParseableConfig.java                        # settings + PARSEABLE_* env-var wiring
-├── ParseableEmitter.java                       # OTel tracer + logger; owns the SDK lifecycle
-├── interceptors/
-│   ├── ParseableWorkerInterceptor.java         # WorkerInterceptor implementation
-│   ├── ParseableWorkflowInboundInterceptor.java  # start / complete / fail events; replay-safe
-│   ├── ParseableWorkflowOutboundInterceptor.java # outbound interceptor (extensible)
-│   └── ParseableActivityInboundInterceptor.java  # activity start / complete / fail
+├── ParseableEmitter.java                       # OTel SDK + OTLP exporters; owns lifecycle
+│                                               # exposes OpenTracing tracer (OT->OTel shim)
+│                                               # for Temporal's official interceptors
 ├── exporters/
 │   └── SanitizingSpanExporter.java             # flattens non-primitive span attributes
 └── version/
@@ -113,8 +110,7 @@ examples/src/main/java/com/parseable/temporal/example/
 src/test/java/com/parseable/temporal/
 ├── ParseableConfigTest.java                    # unit tests for config validation + defaults
 ├── SanitizingSpanExporterTest.java             # unit tests for attribute sanitization
-├── ParseablePluginTest.java                    # unit tests for plugin configuration
-└── ParseableInterceptorTest.java               # in-process Temporal interceptor tests
+└── ParseablePluginTest.java                    # unit tests for plugin configuration
 ```
 
 ## Architecture
@@ -129,16 +125,15 @@ src/test/java/com/parseable/temporal/
 │           Worker              │
 │                               │
 │  ┌─────────────────────────┐  │
-│  │  WorkflowInbound +      │  │
-│  │  WorkflowOutbound       │  │
-│  │  interceptors           │  │
-│  │                         │  │
-│  │  Workflow.isReplaying() │  │  ← replay guard
+│  │ Temporal SDK official   │  │
+│  │ OpenTracingWorker +     │  │
+│  │ OpenTracingClient       │  │
+│  │ interceptors            │  │  ← replay-safe, context-propagated
 │  └───────────────┬─────────┘  │
 │                  ▼            │
 │  ┌──────────────────────────┐ │
-│  │  ActivityInbound         │ │
-│  │  interceptor             │ │
+│  │  OT -> OTel shim         │ │
+│  │  (opentracing-shim)      │ │
 │  └──────────────┬───────────┘ │
 │                 │             │
 │  ┌──────────────▼───────────┐ │
@@ -163,16 +158,15 @@ src/test/java/com/parseable/temporal/
 
 ### Key design points
 
-**Replay safety.** Workflow events are guarded with `Workflow.isReplaying()`. When Temporal
-replays workflow history the guard suppresses emission — no duplicate logs or spans.
+**Tracing instrumentation.** Spans are produced by Temporal's official
+`temporal-opentracing` module — `OpenTracingClientInterceptor` for client-side calls
+(start, signal, query, update, cancel, terminate) and `OpenTracingWorkerInterceptor` for
+worker-side workflow + activity executions. The Temporal SDK team owns replay safety,
+context propagation through the server, child workflow + local activity correctness.
 
-**Restart tolerance.** Each lifecycle event emits its own closed span, keyed with workflow ID and
-run ID. In-memory span context is used only for best-effort parent/child correlation, so terminal
-events still export after a worker restart.
-
-**Client operations.** The workflow client interceptor records starts, signals, queries, updates,
-cancels, and terminations as short `CLIENT` spans/logs. It records operation names and workflow
-identifiers, but not arguments or payloads.
+**Bridge to OTel.** The OpenTracing tracer passed into the interceptors is the
+`opentracing-shim`-wrapped OpenTelemetry SDK exposed by `ParseableEmitter`. Spans flow
+through the shim into the OTel `SdkTracerProvider` and out via OTLP/HTTP to Parseable.
 
 **SanitizingSpanExporter.** Parseable's OTLP parser rejects spans containing array or map-typed
 attributes. `SanitizingSpanExporter` converts array attributes to comma-joined strings and drops
@@ -191,7 +185,6 @@ exits. This force-flushes both the tracer and logger providers so in-flight batc
 | `ParseableConfigTest` | Unit | Required fields, builder overrides, endpoint derivation |
 | `ParseablePluginTest` | Unit | Service/client/factory configuration, duplicate interceptor guard |
 | `SanitizingSpanExporterTest` | Unit | Primitive pass-through, array flattening, flush/shutdown delegation |
-| `ParseableInterceptorTest` | Integration | Workflow + activity event emission, replay-safety assertion |
 
 Run tests:
 ```bash

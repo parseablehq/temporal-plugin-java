@@ -27,7 +27,7 @@ class ParseablePluginTest {
       WorkflowClientOptions clientOptions = clientBuilder.build();
       assertEquals("prod", clientOptions.getNamespace());
       assertArrayEquals(
-          new WorkflowClientInterceptor[] {plugin.getWorkflowClientInterceptor()},
+          new WorkflowClientInterceptor[] {plugin.getClientInterceptor()},
           clientOptions.getInterceptors());
     } finally {
       plugin.close();
@@ -46,7 +46,7 @@ class ParseablePluginTest {
       WorkflowClientInterceptor[] interceptors = builder.build().getInterceptors();
       assertNotNull(interceptors);
       assertEquals(1, interceptors.length);
-      assertSame(plugin.getWorkflowClientInterceptor(), interceptors[0]);
+      assertSame(plugin.getClientInterceptor(), interceptors[0]);
     } finally {
       plugin.close();
     }

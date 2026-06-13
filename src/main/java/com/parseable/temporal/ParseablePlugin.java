@@ -1,12 +1,12 @@
 package com.parseable.temporal;
 
-import com.parseable.temporal.interceptors.ParseableWorkerInterceptor;
-import com.parseable.temporal.interceptors.ParseableWorkflowClientInterceptor;
-
 import io.temporal.client.WorkflowClientOptions;
 import io.temporal.common.SimplePlugin;
 import io.temporal.common.interceptors.WorkerInterceptor;
 import io.temporal.common.interceptors.WorkflowClientInterceptor;
+import io.temporal.opentracing.OpenTracingClientInterceptor;
+import io.temporal.opentracing.OpenTracingOptions;
+import io.temporal.opentracing.OpenTracingWorkerInterceptor;
 import io.temporal.worker.WorkerFactoryOptions;
 
 import javax.annotation.Nonnull;
@@ -18,7 +18,10 @@ import java.util.List;
  * Entry point for the Parseable Temporal plugin (Java SDK).
  *
  * <p>Extends {@link SimplePlugin} so it integrates with the standard Temporal plugin system —
- * register it once and it configures client and worker factory telemetry hooks automatically.
+ * register it once and it wires Temporal's official
+ * {@link OpenTracingClientInterceptor} and {@link OpenTracingWorkerInterceptor} on top of an
+ * OpenTelemetry SDK that exports traces (and exposes a logger provider for logs) to Parseable
+ * via OTLP/HTTP.
  *
  * <h2>Quick start</h2>
  *
@@ -44,8 +47,8 @@ public final class ParseablePlugin extends SimplePlugin implements AutoCloseable
 
   private final ParseableConfig config;
   private final ParseableEmitter emitter;
-  private final ParseableWorkerInterceptor workerInterceptor;
-  private final ParseableWorkflowClientInterceptor workflowClientInterceptor;
+  private final OpenTracingClientInterceptor clientInterceptor;
+  private final OpenTracingWorkerInterceptor workerInterceptor;
 
   public ParseablePlugin(ParseableConfig config) {
     this(config, new ParseableEmitter(config));
@@ -55,8 +58,11 @@ public final class ParseablePlugin extends SimplePlugin implements AutoCloseable
     super("com.parseable.temporal");
     this.config = config;
     this.emitter = emitter;
-    this.workerInterceptor = new ParseableWorkerInterceptor(emitter);
-    this.workflowClientInterceptor = new ParseableWorkflowClientInterceptor(emitter);
+    OpenTracingOptions options = OpenTracingOptions.newBuilder()
+        .setTracer(emitter.getOpenTracingTracer())
+        .build();
+    this.clientInterceptor = new OpenTracingClientInterceptor(options);
+    this.workerInterceptor = new OpenTracingWorkerInterceptor(options);
   }
 
   // ── SimplePlugin overrides ────────────────────────────────────────────────
@@ -71,14 +77,14 @@ public final class ParseablePlugin extends SimplePlugin implements AutoCloseable
     WorkflowClientInterceptor[] existing = builder.build().getInterceptors();
     if (existing != null) {
       for (WorkflowClientInterceptor interceptor : existing) {
-        if (interceptor == workflowClientInterceptor) {
+        if (interceptor == clientInterceptor) {
           return;
         }
       }
     }
     List<WorkflowClientInterceptor> combined = new ArrayList<>(
         existing != null ? Arrays.asList(existing) : new ArrayList<>());
-    combined.add(workflowClientInterceptor);
+    combined.add(clientInterceptor);
     builder.setInterceptors(combined.toArray(new WorkflowClientInterceptor[0]));
   }
 
@@ -103,10 +109,8 @@ public final class ParseablePlugin extends SimplePlugin implements AutoCloseable
 
   public ParseableConfig getConfig() { return config; }
   public ParseableEmitter getEmitter() { return emitter; }
-  public ParseableWorkerInterceptor getWorkerInterceptor() { return workerInterceptor; }
-  public ParseableWorkflowClientInterceptor getWorkflowClientInterceptor() {
-    return workflowClientInterceptor;
-  }
+  public OpenTracingClientInterceptor getClientInterceptor() { return clientInterceptor; }
+  public OpenTracingWorkerInterceptor getWorkerInterceptor() { return workerInterceptor; }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
