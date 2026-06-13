@@ -80,7 +80,7 @@ public final class ParseableConfig {
         .logStream(envOrDefault("PARSEABLE_LOG_STREAM", "temporal-logs"))
         .traceStream(envOrDefault("PARSEABLE_TRACE_STREAM", "temporal-traces"))
         .temporalHost(envOrDefault("PARSEABLE_TEMPORAL_HOST", "localhost:7233"))
-        .temporalNamespace(envOrDefault("PARSEABLE_TEMPORAL_NAMESPACE", "default"))
+        .temporalNamespace(System.getenv("PARSEABLE_TEMPORAL_NAMESPACE"))
         .serviceName(envOrDefault("PARSEABLE_SERVICE_NAME", "temporal-worker"))
         .batchExportTimeoutMs(
             Long.parseLong(envOrDefault("PARSEABLE_BATCH_EXPORT_TIMEOUT_MS", "5000")))
@@ -146,7 +146,7 @@ public final class ParseableConfig {
     private String logStream = "temporal-logs";
     private String traceStream = "temporal-traces";
     private String temporalHost = "localhost:7233";
-    private String temporalNamespace = "default";
+    private String temporalNamespace;
     private String serviceName = "temporal-worker";
     private Duration batchExportTimeout = Duration.ofMillis(5000);
 

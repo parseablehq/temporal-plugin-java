@@ -64,7 +64,10 @@ public final class ParseablePlugin extends SimplePlugin implements AutoCloseable
   @Override
   public void configureWorkflowClient(@Nonnull WorkflowClientOptions.Builder builder) {
     super.configureWorkflowClient(builder);
-    builder.setNamespace(config.getTemporalNamespace());
+    String ns = config.getTemporalNamespace();
+    if (ns != null && !ns.isEmpty()) {
+      builder.setNamespace(ns);
+    }
     WorkflowClientInterceptor[] existing = builder.build().getInterceptors();
     if (existing != null) {
       for (WorkflowClientInterceptor interceptor : existing) {
