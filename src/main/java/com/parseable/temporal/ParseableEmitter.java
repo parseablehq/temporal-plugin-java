@@ -3,16 +3,14 @@ package com.parseable.temporal;
 import com.parseable.temporal.exporters.SanitizingSpanExporter;
 import com.parseable.temporal.version.Version;
 
+import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
-import io.opentelemetry.api.logs.Logger;
-import io.opentelemetry.api.logs.Severity;
-import io.opentelemetry.api.trace.Span;
-import io.opentelemetry.api.trace.SpanKind;
-import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporter;
 import io.opentelemetry.exporter.otlp.http.trace.OtlpHttpSpanExporter;
+import io.opentelemetry.opentracingshim.OpenTracingShim;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.export.BatchLogRecordProcessor;
@@ -20,18 +18,23 @@ import io.opentelemetry.sdk.resources.Resource;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Shared emitter used by all Parseable interceptors.
+ * Owns the {@link OpenTelemetrySdk} that exports traces and logs to Parseable via OTLP/HTTP.
  *
- * <p>Builds and owns the {@link SdkTracerProvider} and {@link SdkLoggerProvider} that export
- * via OTLP/HTTP directly to Parseable — no collector required.
+ * <p>Tracing instrumentation is delegated to Temporal's official
+ * {@code temporal-opentracing} module via the OpenTracing → OpenTelemetry shim
+ * exposed by {@link #getOpenTracingTracer()}.
  *
- * <p>Call {@link #close()} (or let {@link ParseablePlugin#close()} do it) to flush and shut down
- * both providers before your JVM exits.
+ * <p>Application code may use {@link #getOpenTelemetry()} to obtain the configured SDK
+ * (for example, to register an OTel log appender pointed at Parseable's log stream).
+ *
+ * <p>Call {@link #close()} (or let {@link ParseablePlugin#close()} do it) to flush and shut
+ * down both providers before your JVM exits.
  */
 public class ParseableEmitter implements AutoCloseable {
 
@@ -43,116 +46,37 @@ public class ParseableEmitter implements AutoCloseable {
   private static final String LOG_SOURCE_LOGS = "otel-logs";
   private static final String LOG_SOURCE_TRACES = "otel-traces";
 
-  // Span attribute keys
-  private static final AttributeKey<String> WORKFLOW_ID_KEY = AttributeKey.stringKey("temporal.workflow.id");
-  private static final AttributeKey<String> WORKFLOW_TYPE_KEY = AttributeKey.stringKey("temporal.workflow.type");
-  private static final AttributeKey<String> ACTIVITY_TYPE_KEY = AttributeKey.stringKey("temporal.activity.type");
-  private static final AttributeKey<String> TASK_QUEUE_KEY = AttributeKey.stringKey("temporal.task_queue");
-  private static final AttributeKey<String> STATUS_KEY = AttributeKey.stringKey("temporal.status");
-  private static final AttributeKey<String> PLUGIN_VERSION_KEY = AttributeKey.stringKey("temporal.plugin.version");
+  private static final AttributeKey<String> PLUGIN_VERSION_KEY =
+      AttributeKey.stringKey("temporal.plugin.version");
   private static final AttributeKey<String> SDK_KEY = AttributeKey.stringKey("temporal.plugin.sdk");
 
-  private final ParseableConfig config;
   private final OpenTelemetrySdk sdk;
   private final Tracer tracer;
-  private final Logger logger;
+  private final io.opentracing.Tracer openTracingTracer;
 
   public ParseableEmitter(ParseableConfig config) {
-    this.config = config;
-    this.sdk = buildSdk(config);
+    this(config, buildSdk(config));
+  }
+
+  ParseableEmitter(ParseableConfig config, OpenTelemetrySdk sdk) {
+    this.sdk = sdk;
     this.tracer = sdk.getTracerProvider().get(INSTRUMENTATION_SCOPE, Version.PLUGIN_VERSION);
-    this.logger = sdk.getSdkLoggerProvider().get(INSTRUMENTATION_SCOPE);
+    this.openTracingTracer = OpenTracingShim.createTracerShim(sdk);
   }
 
-  // ── Public emit API ───────────────────────────────────────────────────────
-
-  /**
-   * Emits a workflow lifecycle event (start / complete / fail) as both a span and a log record.
-   *
-   * @param workflowId   Temporal workflow ID
-   * @param workflowType Workflow class/type name
-   * @param taskQueue    Task queue name
-   * @param status       "started" | "completed" | "failed"
-   * @param errorMessage nullable; only set when status == "failed"
-   */
-  public void emitWorkflowEvent(
-      String workflowId,
-      String workflowType,
-      String taskQueue,
-      String status,
-      String errorMessage) {
-
-    String spanName = "workflow." + workflowType + "." + status;
-    Attributes attrs = Attributes.builder()
-        .put(WORKFLOW_ID_KEY, workflowId)
-        .put(WORKFLOW_TYPE_KEY, workflowType)
-        .put(TASK_QUEUE_KEY, taskQueue)
-        .put(STATUS_KEY, status)
-        .put(PLUGIN_VERSION_KEY, Version.PLUGIN_VERSION)
-        .put(SDK_KEY, "java")
-        .build();
-
-    emitSpan(spanName, SpanKind.INTERNAL, attrs, errorMessage);
-    emitLog(spanName, status, attrs, errorMessage);
+  /** OpenTelemetry SDK configured to export to Parseable. */
+  public OpenTelemetry getOpenTelemetry() {
+    return sdk;
   }
 
-  /**
-   * Emits an activity lifecycle event (start / complete / fail).
-   *
-   * @param workflowId   Parent workflow ID
-   * @param activityType Activity class/type name
-   * @param taskQueue    Task queue name
-   * @param status       "started" | "completed" | "failed"
-   * @param errorMessage nullable; only set when status == "failed"
-   */
-  public void emitActivityEvent(
-      String workflowId,
-      String activityType,
-      String taskQueue,
-      String status,
-      String errorMessage) {
-
-    String spanName = "activity." + activityType + "." + status;
-    Attributes attrs = Attributes.builder()
-        .put(WORKFLOW_ID_KEY, workflowId)
-        .put(ACTIVITY_TYPE_KEY, activityType)
-        .put(TASK_QUEUE_KEY, taskQueue)
-        .put(STATUS_KEY, status)
-        .put(PLUGIN_VERSION_KEY, Version.PLUGIN_VERSION)
-        .put(SDK_KEY, "java")
-        .build();
-
-    emitSpan(spanName, SpanKind.INTERNAL, attrs, errorMessage);
-    emitLog(spanName, status, attrs, errorMessage);
+  /** OpenTracing tracer bridged to the OTel SDK; passed to Temporal's interceptors. */
+  public io.opentracing.Tracer getOpenTracingTracer() {
+    return openTracingTracer;
   }
 
-  // ── Internal helpers ──────────────────────────────────────────────────────
-
-  private void emitSpan(String name, SpanKind kind, Attributes attrs, String errorMessage) {
-    Span span = tracer.spanBuilder(name).setSpanKind(kind).startSpan();
-    try {
-      span.setAllAttributes(attrs);
-      if (errorMessage != null) {
-        span.setStatus(StatusCode.ERROR, errorMessage);
-        span.setAttribute(AttributeKey.stringKey("error.message"), errorMessage);
-      } else {
-        span.setStatus(StatusCode.OK);
-      }
-    } finally {
-      span.end();
-    }
-  }
-
-  private void emitLog(String body, String status, Attributes attrs, String errorMessage) {
-    Severity severity = "failed".equals(status) ? Severity.ERROR : Severity.INFO;
-    var builder = logger.logRecordBuilder()
-        .setSeverity(severity)
-        .setBody(body)
-        .setAllAttributes(attrs);
-    if (errorMessage != null) {
-      builder.setAttribute(AttributeKey.stringKey("error.message"), errorMessage);
-    }
-    builder.emit();
+  /** OTel tracer scoped to {@code temporal-parseable}; for plugin-internal use. */
+  Tracer getTracer() {
+    return tracer;
   }
 
   // ── SDK construction ──────────────────────────────────────────────────────
@@ -161,7 +85,6 @@ public class ParseableEmitter implements AutoCloseable {
     String authHeader = basicAuthHeader(config.getUsername(), config.getPassword());
     Duration timeout = config.getBatchExportTimeout();
 
-    // ── Span exporter (traces) ──────────────────────────────────────────
     OtlpHttpSpanExporter rawSpanExporter = OtlpHttpSpanExporter.builder()
         .setEndpoint(config.tracesEndpoint())
         .addHeader("Authorization", authHeader)
@@ -179,7 +102,6 @@ public class ParseableEmitter implements AutoCloseable {
         .setResource(resource(config))
         .build();
 
-    // ── Log exporter ────────────────────────────────────────────────────
     OtlpHttpLogRecordExporter logExporter = OtlpHttpLogRecordExporter.builder()
         .setEndpoint(config.logsEndpoint())
         .addHeader("Authorization", authHeader)
@@ -202,17 +124,19 @@ public class ParseableEmitter implements AutoCloseable {
   }
 
   private static Resource resource(ParseableConfig config) {
-    return Resource.create(Attributes.builder()
+    AttributesBuilder b = Attributes.builder()
         .put(AttributeKey.stringKey("service.name"), config.getServiceName())
-        .put(AttributeKey.stringKey("temporal.namespace"), config.getTemporalNamespace())
         .put(PLUGIN_VERSION_KEY, Version.PLUGIN_VERSION)
-        .put(SDK_KEY, "java")
-        .build());
+        .put(SDK_KEY, "java");
+    if (config.getTemporalNamespace() != null && !config.getTemporalNamespace().isEmpty()) {
+      b.put(AttributeKey.stringKey("temporal.namespace"), config.getTemporalNamespace());
+    }
+    return Resource.create(b.build());
   }
 
   private static String basicAuthHeader(String username, String password) {
     String credentials = username + ":" + password;
-    return "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes());
+    return "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
   }
 
   @Override

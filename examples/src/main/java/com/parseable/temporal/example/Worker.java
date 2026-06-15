@@ -6,9 +6,7 @@ import com.parseable.temporal.ParseablePlugin;
 import io.temporal.client.WorkflowClient;
 import io.temporal.serviceclient.WorkflowServiceStubs;
 import io.temporal.serviceclient.WorkflowServiceStubsOptions;
-import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
-import io.temporal.worker.WorkerOptions;
 
 /**
  * Demo worker that registers workflows and activities with the Parseable plugin.
@@ -19,24 +17,28 @@ import io.temporal.worker.WorkerOptions;
  *   <li>Parseable running: {@code docker run -p 8000:8000 parseable/parseable ...}</li>
  *   <li>Streams pre-created:
  *   <pre>
- *     curl -X PUT https://demo.parseable.com:8000/api/v1/logstream \
+ *     curl -X PUT "$PARSEABLE_ENDPOINT/api/v1/logstream" \
  *          -H "X-P-Stream: temporal-logs" \
- *          -u admin:password
+ *          -u "$PARSEABLE_USERNAME:$PARSEABLE_PASSWORD"
  *
- *     curl -X PUT https://demo.parseable.com:8000/api/v1/logstream \
+ *     curl -X PUT "$PARSEABLE_ENDPOINT/api/v1/logstream" \
  *          -H "X-P-Stream: temporal-traces" \
- *          -u admin:password
+ *          -u "$PARSEABLE_USERNAME:$PARSEABLE_PASSWORD"
  *   </pre></li>
  * </ol>
  *
- * <p>Set env vars or use defaults:
+ * <p>Required env vars:
  * <ul>
- *   <li>{@code PARSEABLE_ENDPOINT} — default: {@code https://demo.parseable.com:8000}</li>
- *   <li>{@code PARSEABLE_USERNAME} — default: {@code admin}</li>
- *   <li>{@code PARSEABLE_PASSWORD} — default: {@code password}</li>
+ *   <li>{@code PARSEABLE_ENDPOINT} — e.g. {@code https://parseable.example.com}</li>
+ *   <li>{@code PARSEABLE_USERNAME}</li>
+ *   <li>{@code PARSEABLE_PASSWORD}</li>
+ * </ul>
+ *
+ * <p>Optional env vars (with defaults):
+ * <ul>
  *   <li>{@code PARSEABLE_LOG_STREAM} — default: {@code temporal-logs}</li>
  *   <li>{@code PARSEABLE_TRACE_STREAM} — default: {@code temporal-traces}</li>
- *   <li>{@code PARSEABLE_TEMPORAL_HOST} — default: {@code localhost:7233}</li>
+ *   <li>{@code TEMPORAL_TARGET} — default: {@code localhost:7233}</li>
  * </ul>
  */
 public final class Worker {
@@ -44,27 +46,21 @@ public final class Worker {
   private static final String TASK_QUEUE = "parseable-demo-queue";
 
   public static void main(String[] args) throws InterruptedException {
-    ParseableConfig config = ParseableConfig.fromEnv();
-    System.out.println("Starting worker with config: " + config);
-
-    ParseablePlugin plugin = new ParseablePlugin(config);
+    ParseablePlugin plugin = new ParseablePlugin(ParseableConfig.fromEnv());
+    String temporalTarget = System.getenv().getOrDefault("TEMPORAL_TARGET", "localhost:7233");
     Runtime.getRuntime().addShutdownHook(new Thread(plugin::close));
 
     WorkflowServiceStubs stubs = WorkflowServiceStubs.newServiceStubs(
-        plugin.configureServiceStubOptions(
-            WorkflowServiceStubsOptions.newBuilder())
+        WorkflowServiceStubsOptions.newBuilder()
+            .setTarget(temporalTarget)
+            .setPlugins(plugin)
             .build());
 
-    WorkflowClient client = WorkflowClient.newInstance(stubs,
-        plugin.configureClientOptions(
-            io.temporal.client.WorkflowClientOptions.newBuilder())
-            .build());
+    WorkflowClient client = WorkflowClient.newInstance(stubs);
 
     WorkerFactory factory = WorkerFactory.newInstance(client);
 
-    io.temporal.worker.Worker worker = factory.newWorker(
-        TASK_QUEUE,
-        plugin.configureWorkerOptions(WorkerOptions.newBuilder()).build());
+    io.temporal.worker.Worker worker = factory.newWorker(TASK_QUEUE);
 
     worker.registerWorkflowImplementationTypes(
         Workflows.GreetingWorkflowImpl.class,
@@ -72,10 +68,9 @@ public final class Worker {
     worker.registerActivitiesImplementations(new Workflows.GreetingActivitiesImpl());
 
     factory.start();
-    System.out.println("Worker started, listening on task queue: " + TASK_QUEUE);
-    System.out.println("Run the Client in a separate terminal to trigger workflows.");
+    System.out.println("Worker started on task queue: " + TASK_QUEUE);
+    System.out.println("Run Client in a separate terminal to trigger workflows.");
 
-    // Block until interrupted
     Thread.currentThread().join();
   }
 }

@@ -7,17 +7,24 @@ import static org.junit.jupiter.api.Assertions.*;
 class ParseableConfigTest {
 
   @Test
-  void builderDefaults() {
-    ParseableConfig config = ParseableConfig.builder().build();
-    assertEquals("https://demo.parseable.com:8000", config.getEndpoint());
-    assertEquals("admin", config.getUsername());
-    assertEquals("password", config.getPassword());
-    assertEquals("temporal-logs", config.getLogStream());
-    assertEquals("temporal-traces", config.getTraceStream());
-    assertEquals("localhost:7233", config.getTemporalHost());
-    assertEquals("default", config.getTemporalNamespace());
-    assertEquals("temporal-worker", config.getServiceName());
-    assertEquals(5000, config.getBatchExportTimeout().toMillis());
+  void builderRequiresEndpoint() {
+    IllegalStateException ex = assertThrows(IllegalStateException.class,
+        () -> ParseableConfig.builder().username("u").password("p").build());
+    assertTrue(ex.getMessage().contains("endpoint"));
+  }
+
+  @Test
+  void builderRequiresUsername() {
+    IllegalStateException ex = assertThrows(IllegalStateException.class,
+        () -> ParseableConfig.builder().endpoint("http://localhost:8000").password("p").build());
+    assertTrue(ex.getMessage().contains("username"));
+  }
+
+  @Test
+  void builderRequiresPassword() {
+    IllegalStateException ex = assertThrows(IllegalStateException.class,
+        () -> ParseableConfig.builder().endpoint("http://localhost:8000").username("u").build());
+    assertTrue(ex.getMessage().contains("password"));
   }
 
   @Test
@@ -49,17 +56,10 @@ class ParseableConfigTest {
   void endpointDerivations() {
     ParseableConfig config = ParseableConfig.builder()
         .endpoint("https://demo.parseable.com:8000")
+        .username("u")
+        .password("p")
         .build();
     assertEquals("https://demo.parseable.com:8000/v1/logs", config.logsEndpoint());
     assertEquals("https://demo.parseable.com:8000/v1/traces", config.tracesEndpoint());
-  }
-
-  @Test
-  void fromEnvUsesDefaults() {
-    // When no env vars are set the defaults must match the TypeScript/Python SDKs
-    ParseableConfig config = ParseableConfig.fromEnv();
-    assertNotNull(config.getEndpoint());
-    assertNotNull(config.getLogStream());
-    assertNotNull(config.getTraceStream());
   }
 }

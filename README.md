@@ -31,21 +31,21 @@ implementation 'com.parseable:temporal-parseable:0.1.0'
 
 ```java
 // 1. Create the plugin (reads PARSEABLE_* env vars)
-ParseableConfig config = ParseableConfig.fromEnv();
-ParseablePlugin plugin = new ParseablePlugin(config);
+ParseablePlugin plugin = new ParseablePlugin(ParseableConfig.fromEnv());
 
-// 2. Connect to Temporal
+// 2. Connect to Temporal — configure the Temporal target normally,
+//    then register the plugin once on service stubs
 WorkflowServiceStubs stubs = WorkflowServiceStubs.newServiceStubs(
-    plugin.configureServiceStubOptions(WorkflowServiceStubsOptions.newBuilder()).build());
+    WorkflowServiceStubsOptions.newBuilder()
+        .setTarget("localhost:7233")
+        .setPlugins(plugin)
+        .build());
 
-WorkflowClient client = WorkflowClient.newInstance(stubs,
-    plugin.configureClientOptions(WorkflowClientOptions.newBuilder()).build());
+WorkflowClient client = WorkflowClient.newInstance(stubs);
 
-// 3. Create a worker with the interceptor wired in
+// 3. Create a worker factory — the plugin is propagated automatically
 WorkerFactory factory = WorkerFactory.newInstance(client);
-Worker worker = factory.newWorker(
-    "my-queue",
-    plugin.configureWorkerOptions(WorkerOptions.newBuilder()).build());
+Worker worker = factory.newWorker("my-queue");
 
 worker.registerWorkflowImplementationTypes(MyWorkflow.class);
 worker.registerActivitiesImplementations(new MyActivitiesImpl());
@@ -61,12 +61,12 @@ All settings can be set via environment variables or the `ParseableConfig.Builde
 
 | Environment variable              | Builder method              | Default                              |
 |-----------------------------------|-----------------------------|--------------------------------------|
-| `PARSEABLE_ENDPOINT`              | `.endpoint(...)`            | `https://demo.parseable.com:8000`    |
-| `PARSEABLE_USERNAME`              | `.username(...)`            | `admin`                              |
-| `PARSEABLE_PASSWORD`              | `.password(...)`            | `password`                           |
+| `PARSEABLE_ENDPOINT`              | `.endpoint(...)`            | **required**                         |
+| `PARSEABLE_USERNAME`              | `.username(...)`            | **required**                         |
+| `PARSEABLE_PASSWORD`              | `.password(...)`            | **required**                         |
 | `PARSEABLE_LOG_STREAM`            | `.logStream(...)`           | `temporal-logs`                      |
 | `PARSEABLE_TRACE_STREAM`          | `.traceStream(...)`         | `temporal-traces`                    |
-| `PARSEABLE_TEMPORAL_HOST`         | `.temporalHost(...)`        | `localhost:7233`                     |
+| `PARSEABLE_TEMPORAL_HOST`         | `.temporalHost(...)`        | Deprecated; configure Temporal with `WorkflowServiceStubsOptions.setTarget(...)` |
 | `PARSEABLE_TEMPORAL_NAMESPACE`    | `.temporalNamespace(...)`   | `default`                            |
 | `PARSEABLE_SERVICE_NAME`          | `.serviceName(...)`         | `temporal-worker`                    |
 | `PARSEABLE_BATCH_EXPORT_TIMEOUT_MS` | `.batchExportTimeoutMs(...)` | `5000`                           |
@@ -79,12 +79,12 @@ Parseable requires streams to exist before ingestion. Create them once:
 # Log stream
 curl -X PUT https://<endpoint>/api/v1/logstream \
      -H "X-P-Stream: temporal-logs" \
-     -u admin:password
+     -u "$PARSEABLE_USERNAME:$PARSEABLE_PASSWORD"
 
 # Trace stream
 curl -X PUT https://<endpoint>/api/v1/logstream \
      -H "X-P-Stream: temporal-traces" \
-     -u admin:password
+     -u "$PARSEABLE_USERNAME:$PARSEABLE_PASSWORD"
 ```
 
 ## Repository layout
@@ -94,12 +94,9 @@ pom.xml                                         # Maven build; publishes to Mave
 src/main/java/com/parseable/temporal/
 ├── ParseablePlugin.java                        # entry point — create one instance per worker
 ├── ParseableConfig.java                        # settings + PARSEABLE_* env-var wiring
-├── ParseableEmitter.java                       # OTel tracer + logger; owns the SDK lifecycle
-├── interceptors/
-│   ├── ParseableWorkerInterceptor.java         # WorkerInterceptor implementation
-│   ├── ParseableWorkflowInboundInterceptor.java  # start / complete / fail events; replay-safe
-│   ├── ParseableWorkflowOutboundInterceptor.java # outbound interceptor (extensible)
-│   └── ParseableActivityInboundInterceptor.java  # activity start / complete / fail
+├── ParseableEmitter.java                       # OTel SDK + OTLP exporters; owns lifecycle
+│                                               # exposes OpenTracing tracer (OT->OTel shim)
+│                                               # for Temporal's official interceptors
 ├── exporters/
 │   └── SanitizingSpanExporter.java             # flattens non-primitive span attributes
 └── version/
@@ -111,9 +108,9 @@ examples/src/main/java/com/parseable/temporal/example/
 └── Client.java                                 # triggers example workflows
 
 src/test/java/com/parseable/temporal/
-├── ParseableConfigTest.java                    # unit tests for config + defaults
+├── ParseableConfigTest.java                    # unit tests for config validation + defaults
 ├── SanitizingSpanExporterTest.java             # unit tests for attribute sanitization
-└── ParseableInterceptorTest.java               # integration tests (tag: integration)
+└── ParseablePluginTest.java                    # unit tests for plugin configuration
 ```
 
 ## Architecture
@@ -128,16 +125,15 @@ src/test/java/com/parseable/temporal/
 │           Worker              │
 │                               │
 │  ┌─────────────────────────┐  │
-│  │  WorkflowInbound +      │  │
-│  │  WorkflowOutbound       │  │
-│  │  interceptors           │  │
-│  │                         │  │
-│  │  Workflow.isReplaying() │  │  ← replay guard
+│  │ Temporal SDK official   │  │
+│  │ OpenTracingWorker +     │  │
+│  │ OpenTracingClient       │  │
+│  │ interceptors            │  │  ← replay-safe, context-propagated
 │  └───────────────┬─────────┘  │
 │                  ▼            │
 │  ┌──────────────────────────┐ │
-│  │  ActivityInbound         │ │
-│  │  interceptor             │ │
+│  │  OT -> OTel shim         │ │
+│  │  (opentracing-shim)      │ │
 │  └──────────────┬───────────┘ │
 │                 │             │
 │  ┌──────────────▼───────────┐ │
@@ -162,8 +158,15 @@ src/test/java/com/parseable/temporal/
 
 ### Key design points
 
-**Replay safety.** Workflow events are guarded with `Workflow.isReplaying()`. When Temporal
-replays workflow history the guard suppresses emission — no duplicate logs or spans.
+**Tracing instrumentation.** Spans are produced by Temporal's official
+`temporal-opentracing` module — `OpenTracingClientInterceptor` for client-side calls
+(start, signal, query, update, cancel, terminate) and `OpenTracingWorkerInterceptor` for
+worker-side workflow + activity executions. The Temporal SDK team owns replay safety,
+context propagation through the server, child workflow + local activity correctness.
+
+**Bridge to OTel.** The OpenTracing tracer passed into the interceptors is the
+`opentracing-shim`-wrapped OpenTelemetry SDK exposed by `ParseableEmitter`. Spans flow
+through the shim into the OTel `SdkTracerProvider` and out via OTLP/HTTP to Parseable.
 
 **SanitizingSpanExporter.** Parseable's OTLP parser rejects spans containing array or map-typed
 attributes. `SanitizingSpanExporter` converts array attributes to comma-joined strings and drops
@@ -179,11 +182,11 @@ exits. This force-flushes both the tracer and logger providers so in-flight batc
 
 | Test class | Type | What it covers |
 |---|---|---|
-| `ParseableConfigTest` | Unit | Env-var defaults, builder overrides, endpoint derivation |
+| `ParseableConfigTest` | Unit | Required fields, builder overrides, endpoint derivation |
+| `ParseablePluginTest` | Unit | Service/client/factory configuration, duplicate interceptor guard |
 | `SanitizingSpanExporterTest` | Unit | Primitive pass-through, array flattening, flush/shutdown delegation |
-| `ParseableInterceptorTest` | Integration | Workflow + activity event emission, replay-safety assertion |
 
-Run unit tests (default):
+Run tests:
 ```bash
 mvn test
 ```
@@ -191,6 +194,12 @@ mvn test
 Run all tests including integration:
 ```bash
 mvn test -Pintegration
+```
+
+Compile examples against the current checkout:
+```bash
+mvn install -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true
+mvn -f examples/pom.xml compile
 ```
 
 ## Running the demo
@@ -201,10 +210,11 @@ temporal server start-dev
 
 # Terminal 2 — start Parseable (or point at staging.parseable.com)
 # Pre-create streams (see above), then:
-mvn compile exec:java -Dexec.mainClass=com.parseable.temporal.example.Worker
+mvn install -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true
+mvn -f examples/pom.xml compile exec:java -Dexec.mainClass=com.parseable.temporal.example.Worker
 
 # Terminal 3
-mvn compile exec:java -Dexec.mainClass=com.parseable.temporal.example.Client
+mvn -f examples/pom.xml compile exec:java -Dexec.mainClass=com.parseable.temporal.example.Client
 ```
 
 ## Publishing to Maven Central
