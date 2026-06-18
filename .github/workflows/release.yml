@@ -14,10 +14,10 @@ jobs:
     name: Publish to Maven Central
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up JDK 11
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: "11"
           distribution: temurin
@@ -25,14 +25,36 @@ jobs:
           server-id: central
           server-username: CENTRAL_TOKEN_USERNAME
           server-password: CENTRAL_TOKEN_PASSWORD
-          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
-          gpg-passphrase: GPG_PASSPHRASE
+
+      - name: Import GPG private key
+        shell: bash
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GPG_PRIVATE_KEY}" ]]; then
+            echo "::error::GPG_PRIVATE_KEY secret is empty"
+            exit 1
+          fi
+
+          key_file="$(mktemp)"
+          trap 'rm -f "${key_file}"' EXIT
+
+          if [[ "${GPG_PRIVATE_KEY}" == *"-----BEGIN PGP PRIVATE KEY BLOCK-----"* ]]; then
+            printf '%s' "${GPG_PRIVATE_KEY}" | sed 's/\\n/\n/g' > "${key_file}"
+          else
+            printf '%s' "${GPG_PRIVATE_KEY}" | base64 --decode > "${key_file}"
+          fi
+
+          gpg --batch --import "${key_file}"
+          gpg --batch --list-secret-keys --keyid-format LONG
 
       - name: Build release artifacts
         run: mvn --batch-mode clean verify -Dgpg.skip=true
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: maven-artifacts
           path: |
