@@ -41,10 +41,14 @@ jobs:
           key_file="$(mktemp)"
           trap 'rm -f "${key_file}"' EXIT
 
-          if [[ "${GPG_PRIVATE_KEY}" == *"-----BEGIN PGP PRIVATE KEY BLOCK-----"* ]]; then
-            printf '%s' "${GPG_PRIVATE_KEY}" | sed 's/\\n/\n/g' > "${key_file}"
+          normalized_key="$(printf '%s' "${GPG_PRIVATE_KEY}" | sed 's/\\n/\n/g')"
+
+          if [[ "${normalized_key}" == *"-----BEGIN PGP PRIVATE KEY BLOCK-----"* ]]; then
+            printf '%s' "${normalized_key}" > "${key_file}"
+          elif printf '%s' "${GPG_PRIVATE_KEY}" | tr -d '\r\n' | base64 --decode > "${key_file}" 2>/dev/null; then
+            :
           else
-            printf '%s' "${GPG_PRIVATE_KEY}" | base64 --decode > "${key_file}"
+            printf '%s' "${normalized_key}" > "${key_file}"
           fi
 
           gpg --batch --import "${key_file}"
