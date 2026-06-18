@@ -45,10 +45,11 @@ jobs:
 
           if [[ "${normalized_key}" == *"-----BEGIN PGP PRIVATE KEY BLOCK-----"* ]]; then
             printf '%s' "${normalized_key}" > "${key_file}"
-          elif printf '%s' "${GPG_PRIVATE_KEY}" | tr -d '\r\n' | base64 --decode > "${key_file}" 2>/dev/null; then
-            :
           else
-            printf '%s' "${normalized_key}" > "${key_file}"
+            if ! printf '%s' "${normalized_key}" | base64 --decode > "${key_file}" 2>/dev/null; then
+              echo "::notice::GPG_PRIVATE_KEY is not valid base64-encoded. Using raw key format. If import fails, verify the secret contains a valid PGP private key block (armored format)."
+              printf '%s' "${normalized_key}" > "${key_file}"
+            fi
           fi
 
           gpg --batch --import "${key_file}"
