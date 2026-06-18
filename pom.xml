@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>com.parseable</groupId>
@@ -11,7 +11,7 @@
 
   <name>temporal-parseable</name>
   <description>Temporal plugin that exports OpenTelemetry traces and logs directly to Parseable</description>
-  <url>https://github.com/parseablehq/temporal-plugin-java</url>
+  <url>https://github.com/parseablehq/parseable-temporal-java</url>
 
   <licenses>
     <license>
@@ -23,16 +23,16 @@
   <developers>
     <developer>
       <name>Parseable</name>
-      <email>engineering@parseable.com</email>
+      <email>hi@parseable.com</email>
       <organization>Parseable</organization>
       <organizationUrl>https://parseable.com</organizationUrl>
     </developer>
   </developers>
 
   <scm>
-    <connection>scm:git:git://github.com/parseablehq/temporal-plugin-java.git</connection>
-    <developerConnection>scm:git:ssh://github.com/parseablehq/temporal-plugin-java.git</developerConnection>
-    <url>https://github.com/parseablehq/temporal-plugin-java/tree/main</url>
+    <connection>scm:git:git://github.com/parseablehq/parseable-temporal-java.git</connection>
+    <developerConnection>scm:git:ssh://github.com/parseablehq/parseable-temporal-java.git</developerConnection>
+    <url>https://github.com/parseablehq/parseable-temporal-java/tree/main</url>
   </scm>
 
   <properties>
@@ -172,7 +172,9 @@
         <executions>
           <execution>
             <id>attach-sources</id>
-            <goals><goal>jar-no-fork</goal></goals>
+            <goals>
+              <goal>jar-no-fork</goal>
+            </goals>
           </execution>
         </executions>
       </plugin>
@@ -183,7 +185,9 @@
         <executions>
           <execution>
             <id>attach-javadocs</id>
-            <goals><goal>jar</goal></goals>
+            <goals>
+              <goal>jar</goal>
+            </goals>
           </execution>
         </executions>
       </plugin>
@@ -197,7 +201,9 @@
           <execution>
             <id>sign-artifacts</id>
             <phase>verify</phase>
-            <goals><goal>sign</goal></goals>
+            <goals>
+              <goal>sign</goal>
+            </goals>
           </execution>
         </executions>
       </plugin>
@@ -206,11 +212,12 @@
       <plugin>
         <groupId>org.sonatype.central</groupId>
         <artifactId>central-publishing-maven-plugin</artifactId>
-        <version>0.7.0</version>
+        <version>0.11.0</version>
         <extensions>true</extensions>
         <configuration>
           <publishingServerId>central</publishingServerId>
           <autoPublish>true</autoPublish>
+          <waitUntil>published</waitUntil>
         </configuration>
       </plugin>
       <plugin>
@@ -227,7 +234,9 @@
           <execution>
             <id>validate</id>
             <phase>validate</phase>
-            <goals><goal>check</goal></goals>
+            <goals>
+              <goal>check</goal>
+            </goals>
           </execution>
         </executions>
       </plugin>
